@@ -11,7 +11,9 @@
     "node": ">=20"
   },
   "dependencies": {
-    "bufferutil": "4.1.0",
     "ws": "8.22.0"
+  },
+  "optionalDependencies": {
+    "bufferutil": "4.1.0"
   }
 }
