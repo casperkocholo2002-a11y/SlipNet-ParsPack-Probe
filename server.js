@@ -4,6 +4,7 @@ const http = require('http');
 const crypto = require('crypto');
 const net = require('net');
 const tls = require('tls');
+const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
@@ -68,7 +69,7 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
-      build: 'multi-origin-wss-backend-v4',
+      build: 'ws-stream-relay-v5',
       now: new Date().toISOString(),
     });
   }
@@ -248,125 +249,82 @@ const server = http.createServer((req, res) => {
   json(res, 404, { ok: false, error: 'not_found' });
 });
 
-function makeFrame(opcode, payload) {
-  const p = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-  let head;
-  if (p.length < 126) {
-    head = Buffer.from([0x80 | opcode, p.length]);
-  } else if (p.length <= 0xffff) {
-    head = Buffer.alloc(4);
-    head[0] = 0x80 | opcode;
-    head[1] = 126;
-    head.writeUInt16BE(p.length, 2);
-  } else {
-    head = Buffer.alloc(10);
-    head[0] = 0x80 | opcode;
-    head[1] = 127;
-    head.writeBigUInt64BE(BigInt(p.length), 2);
+const relayWss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: false,
+  clientTracking: false,
+  maxPayload: MAX_WS,
+});
+
+function rejectUpgrade(socket, status = '503 Service Unavailable') {
+  try {
+    socket.end(
+      'HTTP/1.1 ' + status + '\r\n' +
+      'Connection: close\r\n' +
+      'Content-Length: 0\r\n\r\n'
+    );
+  } catch {
+    try { socket.destroy(); } catch {}
   }
-  return Buffer.concat([head, p]);
 }
 
-function websocketAccept(key) {
-  return crypto
-    .createHash('sha1')
-    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-    .digest('base64');
+function tuneSocket(socket) {
+  try { socket.setNoDelay(true); } catch {}
+  try { socket.setKeepAlive(true, 30000); } catch {}
 }
 
-function parseClientFrames(socket, initial, onPayload, onClose) {
-  let buf = initial && initial.length ? Buffer.from(initial) : Buffer.alloc(0);
+function acceptWebSocket(req, socket, head, onAccepted) {
+  tuneSocket(socket);
+  try {
+    relayWss.handleUpgrade(req, socket, head, (ws) => {
+      try { tuneSocket(ws._socket); } catch {}
+      onAccepted(ws);
+    });
+  } catch {
+    try { socket.destroy(); } catch {}
+  }
+}
 
-  const parse = () => {
-    while (buf.length >= 2) {
-      const b0 = buf[0];
-      const b1 = buf[1];
-      const opcode = b0 & 0x0f;
-      const masked = (b1 & 0x80) !== 0;
-      let len = b1 & 0x7f;
-      let off = 2;
-
-      if (!masked) return onClose();
-      if (len === 126) {
-        if (buf.length < 4) return;
-        len = buf.readUInt16BE(2);
-        off = 4;
-      } else if (len === 127) {
-        if (buf.length < 10) return;
-        const big = buf.readBigUInt64BE(2);
-        if (big > BigInt(MAX_WS)) return onClose();
-        len = Number(big);
-        off = 10;
-      }
-      if (len > MAX_WS) return onClose();
-      if (buf.length < off + 4 + len) return;
-
-      const mask = buf.subarray(off, off + 4);
-      off += 4;
-      const payload = Buffer.from(buf.subarray(off, off + len));
-      for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
-      buf = buf.subarray(off + len);
-
-      if (opcode === 0x8) {
-        socket.write(makeFrame(0x8, payload));
-        return onClose();
-      }
-      if (opcode === 0x9) {
-        socket.write(makeFrame(0xA, payload));
-        continue;
-      }
-      if (opcode === 0xA) continue;
-      if (opcode === 0x0 || opcode === 0x1 || opcode === 0x2) {
-        onPayload(payload);
-        continue;
-      }
-      return onClose();
-    }
+function bridgeStreams(a, b, closeAll) {
+  let closed = false;
+  const closeOnce = () => {
+    if (closed) return;
+    closed = true;
+    closeAll();
   };
 
-  socket.on('data', (chunk) => {
-    buf = Buffer.concat([buf, chunk]);
-    parse();
-  });
-  parse();
+  a.on('error', closeOnce);
+  b.on('error', closeOnce);
+  a.on('close', closeOnce);
+  b.on('close', closeOnce);
+  a.on('end', closeOnce);
+  b.on('end', closeOnce);
+
+  a.pipe(b);
+  b.pipe(a);
 }
 
 function handleEchoWebSocket(req, socket, head) {
-  const key = req.headers['sec-websocket-key'];
-  const version = req.headers['sec-websocket-version'];
-  if (!key || version !== '13') return socket.destroy();
-
-  socket.write(
-    'HTTP/1.1 101 Switching Protocols\r\n' +
-    'Upgrade: websocket\r\n' +
-    'Connection: Upgrade\r\n' +
-    'Sec-WebSocket-Accept: ' + websocketAccept(key) + '\r\n' +
-    'X-SlipNet-Probe: 1\r\n\r\n'
-  );
-
-  parseClientFrames(
-    socket,
-    head,
-    (payload) => socket.write(makeFrame(0x2, payload)),
-    () => socket.end()
-  );
-  socket.on('error', () => {});
+  acceptWebSocket(req, socket, head, (ws) => {
+    ws.on('message', (data, isBinary) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(data, { binary: isBinary, compress: false });
+    });
+    ws.on('error', () => {});
+  });
 }
 
 function handlePrimaryRelayWebSocket(req, socket, head) {
-  const key = req.headers['sec-websocket-key'];
-  const version = req.headers['sec-websocket-version'];
   const originHost = envValue('ORIGIN_HOST', 'originhost');
   const originPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
   const originServername = envValue('ORIGIN_SERVERNAME', 'originservername');
 
-  if (!key || version !== '13') return socket.destroy();
   if (!originHost || !originServername || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
-    socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-    return;
+    return rejectUpgrade(socket);
   }
 
-  let upgraded = false;
+  let client = null;
+  let clientStream = null;
   let closed = false;
 
   const origin = tls.connect({
@@ -378,153 +336,100 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
       tls.checkServerIdentity(originServername, cert),
     minVersion: 'TLSv1.3',
     ALPNProtocols: ['http/1.1'],
+    highWaterMark: 1024 * 1024,
   });
+  tuneSocket(origin);
 
-  const closeBoth = () => {
+  const closeAll = () => {
     if (closed) return;
     closed = true;
+    try { clientStream && clientStream.destroy(); } catch {}
+    try { client && client.terminate(); } catch {}
     try { origin.destroy(); } catch {}
-    try { socket.end(); } catch {}
+    try { if (!client) socket.destroy(); } catch {}
   };
 
-  origin.setTimeout(15000, closeBoth);
+  origin.setTimeout(15000, () => {
+    if (!client) rejectUpgrade(socket, '504 Gateway Timeout');
+    closeAll();
+  });
 
   origin.once('secureConnect', () => {
     origin.setTimeout(0);
-    upgraded = true;
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\n' +
-      'Upgrade: websocket\r\n' +
-      'Connection: Upgrade\r\n' +
-      'Sec-WebSocket-Accept: ' + websocketAccept(key) + '\r\n' +
-      'X-SlipNet-Relay: 1\r\n\r\n'
-    );
 
-    parseClientFrames(
-      socket,
-      head,
-      (payload) => {
-        if (!origin.write(payload)) {
-          socket.pause();
-          origin.once('drain', () => socket.resume());
-        }
-      },
-      closeBoth
-    );
+    acceptWebSocket(req, socket, head, (ws) => {
+      client = ws;
+      clientStream = createWebSocketStream(ws, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+
+      bridgeStreams(clientStream, origin, closeAll);
+    });
   });
 
-  origin.on('data', (chunk) => {
-    if (!upgraded || closed) return;
-    if (!socket.write(makeFrame(0x2, chunk))) {
-      origin.pause();
-      socket.once('drain', () => origin.resume());
-    }
-  });
-  origin.once('end', closeBoth);
-  origin.once('close', () => { if (!closed) closeBoth(); });
   origin.once('error', () => {
-    if (!upgraded) {
-      try {
-        socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      } catch {}
-    }
-    closeBoth();
+    if (!client) rejectUpgrade(socket, '502 Bad Gateway');
+    closeAll();
   });
-  socket.once('error', closeBoth);
-  socket.once('close', closeBoth);
-}
-
-function wsDataToBuffer(data) {
-  if (Buffer.isBuffer(data)) return data;
-  if (data instanceof ArrayBuffer) return Buffer.from(data);
-  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-  return null;
+  origin.once('close', closeAll);
+  socket.once('error', closeAll);
+  socket.once('close', () => { if (!client) closeAll(); });
 }
 
 function handleDirectRelayWebSocket(req, socket, head) {
-  const key = req.headers['sec-websocket-key'];
-  const version = req.headers['sec-websocket-version'];
   const d = directOriginConfig();
 
-  if (!key || version !== '13') return socket.destroy();
   if (!d.host || !d.servername || !d.path || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535) {
-    socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-    return;
+    return rejectUpgrade(socket);
   }
 
-  let backend;
-  let upgraded = false;
+  let client = null;
+  let clientStream = null;
+  let backendStream = null;
   let closed = false;
-  let openTimer;
 
-  const closeBoth = () => {
-    if (closed) return;
-    closed = true;
-    clearTimeout(openTimer);
-    try { backend && backend.close(); } catch {}
-    try { socket.end(); } catch {}
-  };
-
-  try {
-    backend = new WebSocket(directOriginUrl(d));
-    backend.binaryType = 'arraybuffer';
-  } catch {
-    socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-    return;
-  }
-
-  openTimer = setTimeout(() => {
-    if (!upgraded) {
-      try {
-        socket.end('HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      } catch {}
-    }
-    closeBoth();
-  }, 15000);
-
-  backend.addEventListener('open', () => {
-    clearTimeout(openTimer);
-    upgraded = true;
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\n' +
-      'Upgrade: websocket\r\n' +
-      'Connection: Upgrade\r\n' +
-      'Sec-WebSocket-Accept: ' + websocketAccept(key) + '\r\n' +
-      'X-SlipNet-Relay: direct-wss\r\n\r\n'
-    );
-
-    parseClientFrames(
-      socket,
-      head,
-      (payload) => {
-        if (closed) return;
-        if (backend.bufferedAmount > 8 * 1024 * 1024) return closeBoth();
-        try { backend.send(payload); } catch { closeBoth(); }
-      },
-      closeBoth
-    );
-  }, { once: true });
-
-  backend.addEventListener('message', (event) => {
-    if (!upgraded || closed) return;
-    const payload = wsDataToBuffer(event.data);
-    if (!payload) return closeBoth();
-    if (!socket.write(makeFrame(0x2, payload))) {
-      socket.once('drain', () => {});
-    }
+  const backend = new WebSocket(directOriginUrl(d), {
+    perMessageDeflate: false,
+    handshakeTimeout: 15000,
+    maxPayload: MAX_WS,
   });
 
-  backend.addEventListener('close', closeBoth, { once: true });
-  backend.addEventListener('error', () => {
-    if (!upgraded) {
-      try {
-        socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      } catch {}
-    }
-    closeBoth();
-  }, { once: true });
-  socket.once('error', closeBoth);
-  socket.once('close', closeBoth);
+  const closeAll = () => {
+    if (closed) return;
+    closed = true;
+    try { clientStream && clientStream.destroy(); } catch {}
+    try { backendStream && backendStream.destroy(); } catch {}
+    try { client && client.terminate(); } catch {}
+    try { backend.terminate(); } catch {}
+    try { if (!client) socket.destroy(); } catch {}
+  };
+
+  backend.once('open', () => {
+    try { tuneSocket(backend._socket); } catch {}
+
+    acceptWebSocket(req, socket, head, (ws) => {
+      client = ws;
+      clientStream = createWebSocketStream(ws, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+      backendStream = createWebSocketStream(backend, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+
+      bridgeStreams(clientStream, backendStream, closeAll);
+    });
+  });
+
+  backend.once('error', () => {
+    if (!client) rejectUpgrade(socket, '502 Bad Gateway');
+    closeAll();
+  });
+  backend.once('close', closeAll);
+  socket.once('error', closeAll);
+  socket.once('close', () => { if (!client) closeAll(); });
 }
 
 server.on('upgrade', (req, socket, head) => {
