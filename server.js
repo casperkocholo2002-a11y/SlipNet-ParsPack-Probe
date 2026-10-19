@@ -9,7 +9,11 @@ const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
 const MAX_STREAM = 8 * 1024 * 1024;
 const MAX_WS = 1024 * 1024;
-const RELAY_PATH = String(process.env.RELAY_PATH || '/tunnel');
+function envValue(primary, fallback) {
+  return String(process.env[primary] || process.env[fallback] || '').trim();
+}
+
+const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
 
 function json(res, status, value) {
   const body = Buffer.from(JSON.stringify(value));
@@ -38,17 +42,17 @@ const server = http.createServer((req, res) => {
       service: 'slipnet-parspack-ingress-probe',
       node: process.version,
       relayConfigured: Boolean(
-        String(process.env.ORIGIN_HOST || '').trim() &&
-        Number(process.env.ORIGIN_PORT || 0) &&
-        String(process.env.ORIGIN_SERVERNAME || '').trim()
+        envValue('ORIGIN_HOST', 'originhost') &&
+        Number(envValue('ORIGIN_PORT', 'originport') || 0) &&
+        envValue('ORIGIN_SERVERNAME', 'originservername')
       ),
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === '/origin-check') {
-    const targetHost = String(process.env.ORIGIN_HOST || '').trim();
-    const targetPort = Number(process.env.ORIGIN_PORT || 0);
+    const targetHost = envValue('ORIGIN_HOST', 'originhost');
+    const targetPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
     if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
       return json(res, 503, { ok: false, error: 'origin_check_not_configured' });
     }
@@ -294,9 +298,9 @@ function handleEchoWebSocket(req, socket, head) {
 function handleRelayWebSocket(req, socket, head) {
   const key = req.headers['sec-websocket-key'];
   const version = req.headers['sec-websocket-version'];
-  const originHost = String(process.env.ORIGIN_HOST || '').trim();
-  const originPort = Number(process.env.ORIGIN_PORT || 0);
-  const originServername = String(process.env.ORIGIN_SERVERNAME || '').trim();
+  const originHost = envValue('ORIGIN_HOST', 'originhost');
+  const originPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
+  const originServername = envValue('ORIGIN_SERVERNAME', 'originservername');
 
   if (!key || version !== '13') return socket.destroy();
   if (!originHost || !originServername || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
