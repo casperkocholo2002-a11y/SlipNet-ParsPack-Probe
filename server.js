@@ -47,7 +47,8 @@ const server = http.createServer((req, res) => {
         envValue('ORIGIN_SERVERNAME', 'originservername')
       ),
       originSniSent: false,
-      build: 'nosni-v1',
+      originTlsMin: 'TLSv1.3',
+      build: 'nosni-tls13-v2',
       now: new Date().toISOString(),
     });
   }
@@ -323,7 +324,7 @@ function handleRelayWebSocket(req, socket, head) {
     rejectUnauthorized: true,
     checkServerIdentity: (_networkHost, cert) =>
       tls.checkServerIdentity(originServername, cert),
-    minVersion: 'TLSv1.2',
+    minVersion: 'TLSv1.3',
     ALPNProtocols: ['http/1.1'],
   });
 
