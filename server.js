@@ -14,6 +14,7 @@ function envValue(primary, fallback) {
 }
 
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
+const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
 
 function json(res, status, value) {
   const body = Buffer.from(JSON.stringify(value));
@@ -46,16 +47,26 @@ const server = http.createServer((req, res) => {
         Number(envValue('ORIGIN_PORT', 'originport') || 0) &&
         envValue('ORIGIN_SERVERNAME', 'originservername')
       ),
+      directRelayConfigured: Boolean(
+        envValue('DIRECT_ORIGIN_HOST', 'directoriginhost') &&
+        Number(envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0) &&
+        envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername')
+      ),
       originSniSent: false,
       originTlsMin: 'TLSv1.3',
-      build: 'nosni-tls13-v2',
+      build: 'multi-origin-nosni-tls13-v3',
       now: new Date().toISOString(),
     });
   }
 
-  if (req.method === 'GET' && url.pathname === '/origin-check') {
-    const targetHost = envValue('ORIGIN_HOST', 'originhost');
-    const targetPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
+  if (req.method === 'GET' && (url.pathname === '/origin-check' || url.pathname === '/direct-origin-check')) {
+    const directCheck = url.pathname === '/direct-origin-check';
+    const targetHost = directCheck
+      ? envValue('DIRECT_ORIGIN_HOST', 'directoriginhost')
+      : envValue('ORIGIN_HOST', 'originhost');
+    const targetPort = Number(directCheck
+      ? (envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0)
+      : (envValue('ORIGIN_PORT', 'originport') || 0));
     if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
       return json(res, 503, { ok: false, error: 'origin_check_not_configured' });
     }
@@ -298,12 +309,19 @@ function handleEchoWebSocket(req, socket, head) {
   socket.on('error', () => {});
 }
 
-function handleRelayWebSocket(req, socket, head) {
+function handleRelayWebSocket(req, socket, head, target = 'primary') {
   const key = req.headers['sec-websocket-key'];
   const version = req.headers['sec-websocket-version'];
-  const originHost = envValue('ORIGIN_HOST', 'originhost');
-  const originPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
-  const originServername = envValue('ORIGIN_SERVERNAME', 'originservername');
+  const direct = target === 'direct';
+  const originHost = direct
+    ? envValue('DIRECT_ORIGIN_HOST', 'directoriginhost')
+    : envValue('ORIGIN_HOST', 'originhost');
+  const originPort = Number(direct
+    ? (envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0)
+    : (envValue('ORIGIN_PORT', 'originport') || 0));
+  const originServername = direct
+    ? envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername')
+    : envValue('ORIGIN_SERVERNAME', 'originservername');
 
   if (!key || version !== '13') return socket.destroy();
   if (!originHost || !originServername || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
@@ -391,7 +409,8 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
-  if (url.pathname === RELAY_PATH) return handleRelayWebSocket(req, socket, head);
+  if (url.pathname === RELAY_PATH) return handleRelayWebSocket(req, socket, head, 'primary');
+  if (url.pathname === DIRECT_RELAY_PATH) return handleRelayWebSocket(req, socket, head, 'direct');
   return socket.destroy();
 });
 
