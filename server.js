@@ -69,7 +69,7 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
-      build: 'ws-stream-relay-v5',
+      build: 'graceful-drain-relay-v7',
       now: new Date().toISOString(),
     });
   }
@@ -285,7 +285,7 @@ function acceptWebSocket(req, socket, head, onAccepted) {
   }
 }
 
-function bridgeStreams(a, b, closeAll) {
+function bridgeStreams(clientStream, upstreamStream, closeAll) {
   let closed = false;
   const closeOnce = () => {
     if (closed) return;
@@ -293,15 +293,23 @@ function bridgeStreams(a, b, closeAll) {
     closeAll();
   };
 
-  a.on('error', closeOnce);
-  b.on('error', closeOnce);
-  a.on('close', closeOnce);
-  b.on('close', closeOnce);
-  a.on('end', closeOnce);
-  b.on('end', closeOnce);
+  // Do not tear both sides down on readable "end". pipe() must be allowed
+  // to flush the destination writable buffer first, otherwise the final
+  // WebSocket frames can be truncated on slower provider links.
+  clientStream.on('error', closeOnce);
+  upstreamStream.on('error', closeOnce);
 
-  a.pipe(b);
-  b.pipe(a);
+  // The outer client closing means there is nowhere left to flush to.
+  clientStream.once('close', closeOnce);
+
+  // An upstream close without a normal readable end is an abort. A normal
+  // end is handled by pipe(), which ends and flushes the client stream.
+  upstreamStream.once('close', () => {
+    if (!upstreamStream.readableEnded) closeOnce();
+  });
+
+  clientStream.pipe(upstreamStream);
+  upstreamStream.pipe(clientStream);
 }
 
 function handleEchoWebSocket(req, socket, head) {
@@ -372,7 +380,6 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
     if (!client) rejectUpgrade(socket, '502 Bad Gateway');
     closeAll();
   });
-  origin.once('close', closeAll);
   socket.once('error', closeAll);
   socket.once('close', () => { if (!client) closeAll(); });
 }
@@ -427,7 +434,6 @@ function handleDirectRelayWebSocket(req, socket, head) {
     if (!client) rejectUpgrade(socket, '502 Bad Gateway');
     closeAll();
   });
-  backend.once('close', closeAll);
   socket.once('error', closeAll);
   socket.once('close', () => { if (!client) closeAll(); });
 }
