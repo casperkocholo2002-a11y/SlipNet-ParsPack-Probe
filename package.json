@@ -1,0 +1,13 @@
+{
+  "name": "slipnet-parspack-ingress-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Public-safe ParsPack PaaS ingress capability probe",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
