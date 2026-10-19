@@ -1,27 +1,42 @@
-# ParsPack PaaS ingress probe
+# SlipNet ParsPack PaaS ingress probe/relay
 
-Public-safe diagnostic service for testing a ParsPack PaaS ingress. It contains no
-SlipNet credentials and does not proxy arbitrary destinations.
+Public-safe diagnostic and fixed-destination WebSocket relay for validating a
+ParsPack PaaS ingress. The repository intentionally contains no live SlipNet
+credentials, origin IPs, UUIDs or TLS private keys.
 
-Endpoints:
+## Diagnostic endpoints
 
-- `GET /health` — liveness JSON.
-- `POST /echo` — returns received byte count and SHA-256, max 16 MiB.
-- `GET /stream?bytes=1048576&chunk=16384&delay_ms=0` — bounded deterministic stream.
-- `GET /hold?seconds=30` — one small chunk per second, max 120 seconds.
-- `WS /ws` — bounded WebSocket text/binary echo, max 1 MiB/frame.
-- `GET /origin-check` — bounded outbound TCP reachability test to an operator-configured destination.
+- `GET /health`
+- `POST /echo` — bounded to 16 MiB
+- `GET /stream?bytes=1048576&chunk=16384&delay_ms=0`
+- `GET /hold?seconds=30`
+- `WS /ws` — bounded echo probe
+- `GET /origin-check` — bounded TCP reachability check to the configured origin
 
-For `/origin-check`, configure environment variables in the PaaS application:
+## Fixed WebSocket relay
+
+The production relay path defaults to:
 
 ```text
-ORIGIN_HOST=<operator-controlled target>
-ORIGIN_PORT=<1-65535>
+/tunnel
 ```
 
-The destination cannot be supplied by the HTTP caller. The endpoint has a fixed
-5-second timeout and only reports connection success/failure plus at most a small
-server banner.
+The HTTP caller cannot select an arbitrary destination. The relay destination is
+read only from server-side environment variables:
 
-The container listens on `$PORT` (default 3000). Use this only as a temporary
-capability probe, not as a production proxy.
+```text
+ORIGIN_HOST=<private operator value>
+ORIGIN_PORT=<private operator value>
+ORIGIN_SERVERNAME=<private operator value>
+RELAY_PATH=/tunnel
+```
+
+The relay accepts a WebSocket upgrade, opens a verified TLS connection to the
+fixed origin, forwards WebSocket payload bytes to that TLS stream and returns
+origin bytes as binary WebSocket frames.
+
+The application listens on `$PORT` supplied by the PaaS, defaulting to 3000 for
+local testing.
+
+Do not commit live values for ORIGIN_HOST, credentials, UUIDs, certificates or
+private infrastructure inventory to this repository.
