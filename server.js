@@ -46,6 +46,8 @@ const server = http.createServer((req, res) => {
         Number(envValue('ORIGIN_PORT', 'originport') || 0) &&
         envValue('ORIGIN_SERVERNAME', 'originservername')
       ),
+      originSniSent: false,
+      build: 'nosni-v1',
       now: new Date().toISOString(),
     });
   }
