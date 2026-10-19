@@ -10,6 +10,18 @@ Endpoints:
 - `GET /stream?bytes=1048576&chunk=16384&delay_ms=0` — bounded deterministic stream.
 - `GET /hold?seconds=30` — one small chunk per second, max 120 seconds.
 - `WS /ws` — bounded WebSocket text/binary echo, max 1 MiB/frame.
+- `GET /origin-check` — bounded outbound TCP reachability test to an operator-configured destination.
+
+For `/origin-check`, configure environment variables in the PaaS application:
+
+```text
+ORIGIN_HOST=<operator-controlled target>
+ORIGIN_PORT=<1-65535>
+```
+
+The destination cannot be supplied by the HTTP caller. The endpoint has a fixed
+5-second timeout and only reports connection success/failure plus at most a small
+server banner.
 
 The container listens on `$PORT` (default 3000). Use this only as a temporary
 capability probe, not as a production proxy.

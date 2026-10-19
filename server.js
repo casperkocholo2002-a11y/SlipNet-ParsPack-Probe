@@ -2,6 +2,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const net = require('net');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
@@ -36,6 +37,68 @@ const server = http.createServer((req, res) => {
       node: process.version,
       now: new Date().toISOString(),
     });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/origin-check') {
+    const targetHost = String(process.env.ORIGIN_HOST || '').trim();
+    const targetPort = Number(process.env.ORIGIN_PORT || 0);
+    if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+      return json(res, 503, { ok: false, error: 'origin_check_not_configured' });
+    }
+
+    const started = Date.now();
+    const socket = net.createConnection({ host: targetHost, port: targetPort });
+    let settled = false;
+    let banner = Buffer.alloc(0);
+
+    const finish = (status, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(overallTimer);
+      socket.destroy();
+      return json(res, status, value);
+    };
+
+    const overallTimer = setTimeout(() => {
+      finish(504, { ok: false, connected: false, error: 'timeout', ms: Date.now() - started });
+    }, 5000);
+
+    socket.once('connect', () => {
+      const connectMs = Date.now() - started;
+      const settleTimer = setTimeout(() => {
+        finish(200, {
+          ok: true,
+          connected: true,
+          ms: connectMs,
+          banner: banner.toString('utf8').replace(/[^\x20-\x7e\r\n]/g, '').slice(0, 160),
+        });
+      }, 800);
+      socket.once('close', () => clearTimeout(settleTimer));
+    });
+
+    socket.on('data', (chunk) => {
+      if (banner.length < 256) {
+        banner = Buffer.concat([banner, chunk]).subarray(0, 256);
+      }
+      if (banner.includes(0x0a)) {
+        finish(200, {
+          ok: true,
+          connected: true,
+          ms: Date.now() - started,
+          banner: banner.toString('utf8').replace(/[^\x20-\x7e\r\n]/g, '').slice(0, 160),
+        });
+      }
+    });
+
+    socket.once('error', (error) => {
+      finish(502, {
+        ok: false,
+        connected: false,
+        error: error && error.code ? String(error.code) : 'connect_error',
+        ms: Date.now() - started,
+      });
+    });
+    return;
   }
 
   if (req.method === 'POST' && url.pathname === '/echo') {
