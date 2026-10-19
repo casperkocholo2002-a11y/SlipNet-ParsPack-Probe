@@ -314,8 +314,13 @@ function handleRelayWebSocket(req, socket, head) {
   const origin = tls.connect({
     host: originHost,
     port: originPort,
-    servername: originServername,
+    // Hide the internal origin name from the network: no TLS SNI is sent.
+    // Certificate-chain validation stays enabled and hostname validation is
+    // performed locally against ORIGIN_SERVERNAME.
+    servername: undefined,
     rejectUnauthorized: true,
+    checkServerIdentity: (_networkHost, cert) =>
+      tls.checkServerIdentity(originServername, cert),
     minVersion: 'TLSv1.2',
     ALPNProtocols: ['http/1.1'],
   });
