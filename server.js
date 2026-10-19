@@ -3,11 +3,13 @@
 const http = require('http');
 const crypto = require('crypto');
 const net = require('net');
+const tls = require('tls');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
 const MAX_STREAM = 8 * 1024 * 1024;
 const MAX_WS = 1024 * 1024;
+const RELAY_PATH = String(process.env.RELAY_PATH || '/tunnel');
 
 function json(res, status, value) {
   const body = Buffer.from(JSON.stringify(value));
@@ -35,6 +37,11 @@ const server = http.createServer((req, res) => {
       ok: true,
       service: 'slipnet-parspack-ingress-probe',
       node: process.version,
+      relayConfigured: Boolean(
+        String(process.env.ORIGIN_HOST || '').trim() &&
+        Number(process.env.ORIGIN_PORT || 0) &&
+        String(process.env.ORIGIN_SERVERNAME || '').trim()
+      ),
       now: new Date().toISOString(),
     });
   }
@@ -198,34 +205,15 @@ function makeFrame(opcode, payload) {
   return Buffer.concat([head, p]);
 }
 
-server.on('upgrade', (req, socket, head) => {
-  let url;
-  try {
-    url = new URL(req.url, 'http://probe.local');
-  } catch {
-    return socket.destroy();
-  }
-
-  if (url.pathname !== '/ws') return socket.destroy();
-
-  const key = req.headers['sec-websocket-key'];
-  const version = req.headers['sec-websocket-version'];
-  if (!key || version !== '13') return socket.destroy();
-
-  const accept = crypto
+function websocketAccept(key) {
+  return crypto
     .createHash('sha1')
     .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
     .digest('base64');
+}
 
-  socket.write(
-    'HTTP/1.1 101 Switching Protocols\r\n' +
-    'Upgrade: websocket\r\n' +
-    'Connection: Upgrade\r\n' +
-    'Sec-WebSocket-Accept: ' + accept + '\r\n' +
-    'X-SlipNet-Probe: 1\r\n\r\n'
-  );
-
-  let buf = head && head.length ? Buffer.from(head) : Buffer.alloc(0);
+function parseClientFrames(socket, initial, onPayload, onClose) {
+  let buf = initial && initial.length ? Buffer.from(initial) : Buffer.alloc(0);
 
   const parse = () => {
     while (buf.length >= 2) {
@@ -236,7 +224,7 @@ server.on('upgrade', (req, socket, head) => {
       let len = b1 & 0x7f;
       let off = 2;
 
-      if (!masked) return socket.destroy();
+      if (!masked) return onClose();
       if (len === 126) {
         if (buf.length < 4) return;
         len = buf.readUInt16BE(2);
@@ -244,11 +232,11 @@ server.on('upgrade', (req, socket, head) => {
       } else if (len === 127) {
         if (buf.length < 10) return;
         const big = buf.readBigUInt64BE(2);
-        if (big > BigInt(MAX_WS)) return socket.destroy();
+        if (big > BigInt(MAX_WS)) return onClose();
         len = Number(big);
         off = 10;
       }
-      if (len > MAX_WS) return socket.destroy();
+      if (len > MAX_WS) return onClose();
       if (buf.length < off + 4 + len) return;
 
       const mask = buf.subarray(off, off + 4);
@@ -259,17 +247,18 @@ server.on('upgrade', (req, socket, head) => {
 
       if (opcode === 0x8) {
         socket.write(makeFrame(0x8, payload));
-        return socket.end();
+        return onClose();
       }
       if (opcode === 0x9) {
         socket.write(makeFrame(0xA, payload));
         continue;
       }
-      if (opcode === 0x1 || opcode === 0x2) {
-        socket.write(makeFrame(opcode, payload));
+      if (opcode === 0xA) continue;
+      if (opcode === 0x0 || opcode === 0x1 || opcode === 0x2) {
+        onPayload(payload);
         continue;
       }
-      return socket.destroy();
+      return onClose();
     }
   };
 
@@ -277,7 +266,121 @@ server.on('upgrade', (req, socket, head) => {
     buf = Buffer.concat([buf, chunk]);
     parse();
   });
+  parse();
+}
+
+function handleEchoWebSocket(req, socket, head) {
+  const key = req.headers['sec-websocket-key'];
+  const version = req.headers['sec-websocket-version'];
+  if (!key || version !== '13') return socket.destroy();
+
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    'Sec-WebSocket-Accept: ' + websocketAccept(key) + '\r\n' +
+    'X-SlipNet-Probe: 1\r\n\r\n'
+  );
+
+  parseClientFrames(
+    socket,
+    head,
+    (payload) => socket.write(makeFrame(0x2, payload)),
+    () => socket.end()
+  );
   socket.on('error', () => {});
+}
+
+function handleRelayWebSocket(req, socket, head) {
+  const key = req.headers['sec-websocket-key'];
+  const version = req.headers['sec-websocket-version'];
+  const originHost = String(process.env.ORIGIN_HOST || '').trim();
+  const originPort = Number(process.env.ORIGIN_PORT || 0);
+  const originServername = String(process.env.ORIGIN_SERVERNAME || '').trim();
+
+  if (!key || version !== '13') return socket.destroy();
+  if (!originHost || !originServername || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
+    socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    return;
+  }
+
+  let upgraded = false;
+  let closed = false;
+
+  const origin = tls.connect({
+    host: originHost,
+    port: originPort,
+    servername: originServername,
+    rejectUnauthorized: true,
+    minVersion: 'TLSv1.2',
+    ALPNProtocols: ['http/1.1'],
+  });
+
+  const closeBoth = () => {
+    if (closed) return;
+    closed = true;
+    try { origin.destroy(); } catch {}
+    try { socket.end(); } catch {}
+  };
+
+  origin.setTimeout(15000, closeBoth);
+
+  origin.once('secureConnect', () => {
+    origin.setTimeout(0);
+    upgraded = true;
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      'Sec-WebSocket-Accept: ' + websocketAccept(key) + '\r\n' +
+      'X-SlipNet-Relay: 1\r\n\r\n'
+    );
+
+    parseClientFrames(
+      socket,
+      head,
+      (payload) => {
+        if (!origin.write(payload)) {
+          socket.pause();
+          origin.once('drain', () => socket.resume());
+        }
+      },
+      closeBoth
+    );
+  });
+
+  origin.on('data', (chunk) => {
+    if (!upgraded || closed) return;
+    if (!socket.write(makeFrame(0x2, chunk))) {
+      origin.pause();
+      socket.once('drain', () => origin.resume());
+    }
+  });
+  origin.once('end', closeBoth);
+  origin.once('close', () => { if (!closed) closeBoth(); });
+  origin.once('error', () => {
+    if (!upgraded) {
+      try {
+        socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      } catch {}
+    }
+    closeBoth();
+  });
+  socket.once('error', closeBoth);
+  socket.once('close', closeBoth);
+}
+
+server.on('upgrade', (req, socket, head) => {
+  let url;
+  try {
+    url = new URL(req.url, 'http://probe.local');
+  } catch {
+    return socket.destroy();
+  }
+
+  if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
+  if (url.pathname === RELAY_PATH) return handleRelayWebSocket(req, socket, head);
+  return socket.destroy();
 });
 
 server.listen(PORT, '0.0.0.0', () => {
