@@ -17,10 +17,17 @@ function envValue(primary, fallback) {
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
 
+const LEGACY_DIRECT_ORIGIN = 'cdn.cspf.online';
+const CURRENT_DIRECT_ORIGIN = 'slipnet.wordpresscsp.ir';
+
+function normalizeDirectOrigin(value) {
+  return value === LEGACY_DIRECT_ORIGIN ? CURRENT_DIRECT_ORIGIN : value;
+}
+
 function directOriginConfig() {
-  const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
+  const host = normalizeDirectOrigin(envValue('DIRECT_ORIGIN_HOST', 'directoriginhost'));
   const port = Number(envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0);
-  const servername = envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername');
+  const servername = normalizeDirectOrigin(envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername'));
   const path = envValue('DIRECT_ORIGIN_PATH', 'directoriginpath');
   return { host, port, servername, path };
 }
