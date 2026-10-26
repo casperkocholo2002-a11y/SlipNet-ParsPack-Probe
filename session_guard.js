@@ -5,10 +5,13 @@ const net = require('net');
 
 const DEFAULT_URL = 'https://monitor.cspf.shop/api/v2ray-session/telemetry';
 
-function normalizeIp(raw) {
+function normalizeIp(raw, forwarded = false) {
   let value = String(raw || '').trim();
   if (!value) return '';
-  if (value.includes(',')) value = value.split(',')[0].trim();
+  if (value.includes(',')) {
+    const parts = value.split(',').map((x) => x.trim()).filter(Boolean);
+    value = forwarded ? (parts[parts.length - 1] || '') : (parts[0] || '');
+  }
   if (value.startsWith('::ffff:')) value = value.slice(7);
   const zone = value.indexOf('%');
   if (zone !== -1) value = value.slice(0, zone);
@@ -34,7 +37,8 @@ function sourceIp(req, route = '') {
         req && req.socket && req.socket.remoteAddress,
       ];
   for (const candidate of candidates) {
-    const ip = normalizeIp(candidate);
+    const forwarded = candidate === h['x-forwarded-for'];
+    const ip = normalizeIp(candidate, forwarded);
     if (ip) return ip;
   }
   return '';
