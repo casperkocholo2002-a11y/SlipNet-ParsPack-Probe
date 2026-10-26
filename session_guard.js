@@ -62,8 +62,8 @@ function uuidHash(uuid) {
   return crypto.createHash('sha256').update(uuid).digest('hex');
 }
 
-function proof(uuid, hash, ip, route, event, ts) {
-  const message = [hash, ip, route, event, String(ts)].join('|');
+function proof(uuid, hash, ip, route, event, ts, sessionId) {
+  const message = [hash, ip, route, event, String(ts), sessionId].join('|');
   return crypto.createHmac('sha256', uuid).update(message).digest('hex');
 }
 
@@ -120,7 +120,7 @@ function waitForBytes(stream, needed, timeoutMs) {
 function createSessionGuard(options = {}) {
   const route = String(options.route || 'parspack').trim().toLowerCase();
   const telemetryUrl = String(options.telemetryUrl || DEFAULT_URL).trim();
-  const heartbeatMs = Number(options.heartbeatMs || 10000);
+  const heartbeatMs = Number(options.heartbeatMs || 5000);
   const requestTimeoutMs = Number(options.requestTimeoutMs || 1800);
   const enabled = String(process.env.CONCURRENCY_GUARD || '1') !== '0';
 
@@ -133,7 +133,8 @@ function createSessionGuard(options = {}) {
       route,
       event,
       ts,
-      proof: proof(meta.uuid, meta.hash, meta.ip, route, event, ts),
+      session_id: meta.sessionId,
+      proof: proof(meta.uuid, meta.hash, meta.ip, route, event, ts, meta.sessionId),
     };
     return postTelemetry(telemetryUrl, payload, requestTimeoutMs);
   }
@@ -160,7 +161,12 @@ function createSessionGuard(options = {}) {
       return {ok: false, guarded: true, reason: 'invalid_vless_uuid'};
     }
 
-    const meta = {uuid, hash: uuidHash(uuid), ip};
+    const meta = {
+      uuid,
+      hash: uuidHash(uuid),
+      ip,
+      sessionId: crypto.randomBytes(12).toString('hex'),
+    };
     const opened = await emit(meta, 'open');
 
     // Telemetry outages must not become connectivity outages.
@@ -186,7 +192,10 @@ function createSessionGuard(options = {}) {
       if (stopped || heartbeatRunning) return;
       heartbeatRunning = true;
       try {
-        const state = await emit(meta, 'heartbeat');
+        let state = await emit(meta, 'heartbeat');
+        if (!stopped && state && state.known && state.session_known === false) {
+          state = await emit(meta, 'open');
+        }
         if (state && state.locked) {
           stop();
           try { ws.terminate(); } catch {}
