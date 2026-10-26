@@ -2,7 +2,7 @@ FROM node:24-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY server.js ./
+COPY server.js session_guard.js ./
 ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
