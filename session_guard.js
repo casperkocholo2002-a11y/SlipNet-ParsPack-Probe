@@ -15,14 +15,24 @@ function normalizeIp(raw) {
   return net.isIP(value) ? value : '';
 }
 
-function sourceIp(req) {
-  const candidates = [
-    req && req.headers && req.headers['x-real-ip'],
-    req && req.headers && req.headers['cf-connecting-ip'],
-    req && req.headers && req.headers['x-forwarded-for'],
-    req && req.headers && req.headers['x-client-ip'],
-    req && req.socket && req.socket.remoteAddress,
-  ];
+function sourceIp(req, route = '') {
+  const h = (req && req.headers) || {};
+  const r = String(route || '').trim().toLowerCase();
+  const candidates = r === 'arvan'
+    ? [
+        h['ar-real-ip'],
+        h['x-client-ip'],
+        h['x-real-ip'],
+        h['x-forwarded-for'],
+        req && req.socket && req.socket.remoteAddress,
+      ]
+    : [
+        h['x-real-ip'],
+        h['x-forwarded-for'],
+        h['x-client-ip'],
+        h['ar-real-ip'],
+        req && req.socket && req.socket.remoteAddress,
+      ];
   for (const candidate of candidates) {
     const ip = normalizeIp(candidate);
     if (ip) return ip;
@@ -127,7 +137,7 @@ function createSessionGuard(options = {}) {
   async function authorizeStream(stream, ws, req) {
     if (!enabled) return {ok: true, guarded: false};
 
-    const ip = sourceIp(req);
+    const ip = sourceIp(req, route);
     if (!ip) {
       // Fail open if the platform does not expose a usable client IP.
       return {ok: true, guarded: false, reason: 'source_ip_unavailable'};
