@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const net = require('net');
 const tls = require('tls');
 const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
+const { createSessionGuard } = require('./session_guard');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
@@ -15,6 +16,14 @@ function envValue(primary, fallback) {
 }
 
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
+const V2_SESSION_GUARD = createSessionGuard({
+  route: 'parspack',
+  telemetryUrl:
+    envValue('SESSION_TELEMETRY_URL', 'sessiontelemetryurl') ||
+    'https://monitor.cspf.shop/api/v2ray-session/telemetry',
+  heartbeatMs: 10000,
+  requestTimeoutMs: 1800,
+});
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
 
 const WORKER_DIRECT_RELAY_PATH =
@@ -99,7 +108,9 @@ const server = http.createServer((req, res) => {
       workerDirectConfigured: Boolean(WORKER_DIRECT_HOST && WORKER_DIRECT_PATH),
       workerFixedConfigured: Boolean(WORKER_FIXED_HOST && WORKER_FIXED_PATH),
       workerRelayMode: 'wss',
-      build: 'graceful-drain-relay-v8',
+      concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
+      concurrencyGuardRoute: V2_SESSION_GUARD.route,
+      build: 'graceful-drain-relay-v9-concurrency-guard',
       now: new Date().toISOString(),
     });
   }
@@ -401,8 +412,18 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
         encoding: null,
         highWaterMark: 1024 * 1024,
       });
+      clientStream.pause();
 
-      bridgeStreams(clientStream, origin, closeAll);
+      V2_SESSION_GUARD.authorizeStream(clientStream, ws, req)
+        .then((decision) => {
+          if (!decision || !decision.ok || closed) {
+            closeAll();
+            return;
+          }
+          clientStream.resume();
+          bridgeStreams(clientStream, origin, closeAll);
+        })
+        .catch(closeAll);
     });
   });
 
