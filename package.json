@@ -2,10 +2,10 @@
   "name": "slipnet-parspack-ingress-probe",
   "version": "1.0.0",
   "private": true,
-  "description": "Public-safe ParsPack PaaS ingress capability probe",
-  "main": "server.js",
+  "description": "Isolated ParsPack ECH shadow probe; no live route mutation",
+  "main": "ech-shadow.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node ech-shadow.js"
   },
   "engines": {
     "node": ">=20"
