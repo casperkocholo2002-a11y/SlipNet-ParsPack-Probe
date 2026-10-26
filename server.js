@@ -17,7 +17,7 @@ function envValue(primary, fallback) {
 
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
 const V2_SESSION_GUARD = createSessionGuard({
-  route: 'parspack',
+  route: 'arvan',
   telemetryUrl:
     envValue('SESSION_TELEMETRY_URL', 'sessiontelemetryurl') ||
     'https://monitor.cspf.shop/api/v2ray-session/telemetry',
