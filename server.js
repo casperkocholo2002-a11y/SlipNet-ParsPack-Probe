@@ -21,7 +21,7 @@ const V2_SESSION_GUARD = createSessionGuard({
   telemetryUrl:
     envValue('SESSION_TELEMETRY_URL', 'sessiontelemetryurl') ||
     'https://monitor.cspf.shop/api/v2ray-session/telemetry',
-  heartbeatMs: 10000,
+  heartbeatMs: 5000,
   requestTimeoutMs: 1800,
 });
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
