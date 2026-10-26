@@ -420,7 +420,6 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
             closeAll();
             return;
           }
-          clientStream.resume();
           bridgeStreams(clientStream, origin, closeAll);
         })
         .catch(closeAll);
