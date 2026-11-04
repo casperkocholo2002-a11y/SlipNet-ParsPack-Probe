@@ -2,9 +2,10 @@ name: Publish relay container
 
 on:
   push:
-    branches: [main]
+    branches: [emergency-arvan-concurrency-20261104]
     paths:
       - server.js
+      - session_guard.js
       - package.json
       - Dockerfile
       - .dockerignore
@@ -31,7 +32,6 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:latest
-            ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:${{ github.sha }}
+            ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:emergency-arvan-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/casperkocholo2002-a11y/SlipNet-ParsPack-Probe
