@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -70,5 +71,46 @@ func TestTelemetryProof(t *testing.T) {
 	want := hex.EncodeToString(mac.Sum(nil))
 	if got != want {
 		t.Fatalf("proof mismatch")
+	}
+}
+
+func TestTelemetryFallback(t *testing.T) {
+	primaryCalls := 0
+	fallbackCalls := 0
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls++
+		http.Error(w, "unavailable", http.StatusBadGateway)
+	}))
+	defer primary.Close()
+
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackCalls++
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte("{\"known\":true,\"session_known\":true,\"locked\":false,\"active_sources\":1}"))
+	}))
+	defer fallback.Close()
+
+	uuid := "12345678-1234-5678-9abc-def012345678"
+	g := &sessionGuard{
+		enabled:           true,
+		route:             "parspack",
+		telemetryURL:      primary.URL,
+		telemetryFallback: fallback.URL,
+		client:            &http.Client{},
+	}
+	meta := &sessionMeta{
+		UUID:      uuid,
+		Hash:      uuidHash(uuid),
+		IP:        "203.0.113.10",
+		SessionID: "00112233445566778899aabb",
+	}
+
+	out := g.emit(meta, "open")
+	if out == nil || !out.Known || out.ActiveSources != 1 {
+		t.Fatalf("fallback response not accepted: %#v", out)
+	}
+	if primaryCalls != 1 || fallbackCalls != 1 {
+		t.Fatalf("unexpected call counts primary=%d fallback=%d", primaryCalls, fallbackCalls)
 	}
 }

@@ -30,7 +30,7 @@ const (
 	maxEcho   = 16 * 1024 * 1024
 	maxStream = 8 * 1024 * 1024
 	maxWS     = 1024 * 1024
-	buildID   = "go-green-v1-concurrency-guard-reoos"
+	buildID   = "go-green-v2-concurrency-guard-fallback"
 )
 
 type app struct {

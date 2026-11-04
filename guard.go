@@ -16,6 +16,7 @@ import (
 )
 
 const defaultTelemetryURL = "https://monitor.reoos.ir/api/v2ray-session/telemetry"
+const fallbackTelemetryURL = "https://monitor.cspf.shop/api/v2ray-session/telemetry"
 
 type telemetryResponse struct {
 	Known         bool   `json:"known"`
@@ -33,11 +34,12 @@ type sessionMeta struct {
 }
 
 type sessionGuard struct {
-	enabled      bool
-	route        string
-	telemetryURL string
-	heartbeat    time.Duration
-	client       *http.Client
+	enabled           bool
+	route             string
+	telemetryURL      string
+	telemetryFallback string
+	heartbeat         time.Duration
+	client            *http.Client
 }
 
 func newSessionGuard(route string) *sessionGuard {
@@ -46,12 +48,17 @@ func newSessionGuard(route string) *sessionGuard {
 	if url == "" {
 		url = defaultTelemetryURL
 	}
+	fallback := fallbackTelemetryURL
+	if strings.EqualFold(strings.TrimSpace(url), fallback) {
+		fallback = ""
+	}
 	return &sessionGuard{
-		enabled:      enabled,
-		route:        strings.ToLower(strings.TrimSpace(route)),
-		telemetryURL: url,
-		heartbeat:    5 * time.Second,
-		client:       &http.Client{Timeout: 1800 * time.Millisecond},
+		enabled:           enabled,
+		route:             strings.ToLower(strings.TrimSpace(route)),
+		telemetryURL:      url,
+		telemetryFallback: fallback,
+		heartbeat:         5 * time.Second,
+		client:            &http.Client{Timeout: 1800 * time.Millisecond},
 	}
 }
 
@@ -215,25 +222,34 @@ func (g *sessionGuard) emit(meta *sessionMeta, event string) *telemetryResponse 
 	if err != nil {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodPost, g.telemetryURL, bytes.NewReader(body))
-	if err != nil {
-		return nil
+	urls := []string{g.telemetryURL}
+	if g.telemetryFallback != "" {
+		urls = append(urls, g.telemetryFallback)
 	}
-	req.Header.Set("content-type", "application/json")
-	res, err := g.client.Do(req)
-	if err != nil {
-		return nil
+	for _, endpoint := range urls {
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("content-type", "application/json")
+		res, err := g.client.Do(req)
+		if err != nil {
+			continue
+		}
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+			_ = res.Body.Close()
+			continue
+		}
+		var out telemetryResponse
+		err = json.NewDecoder(io.LimitReader(res.Body, 64*1024)).Decode(&out)
+		_ = res.Body.Close()
+		if err != nil {
+			continue
+		}
+		return &out
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
-		return nil
-	}
-	var out telemetryResponse
-	if err := json.NewDecoder(io.LimitReader(res.Body, 64*1024)).Decode(&out); err != nil {
-		return nil
-	}
-	return &out
+	return nil
 }
 
 func (g *sessionGuard) closeAsync(meta *sessionMeta) {
