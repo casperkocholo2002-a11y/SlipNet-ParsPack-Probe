@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const defaultTelemetryURL = "https://monitor.cspf.shop/api/v2ray-session/telemetry"
+const defaultTelemetryURL = "https://monitor.reoos.ir/api/v2ray-session/telemetry"
 
 type telemetryResponse struct {
 	Known         bool   `json:"known"`
