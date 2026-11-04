@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const net = require('net');
 const tls = require('tls');
 const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
+const { createSessionGuard } = require('./session_guard');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
@@ -15,6 +16,14 @@ function envValue(primary, fallback) {
 }
 
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
+const V2_SESSION_GUARD = createSessionGuard({
+  route: 'arvan',
+  telemetryUrl:
+    envValue('SESSION_TELEMETRY_URL', 'sessiontelemetryurl') ||
+    'https://monitor.reoos.ir/api/v2ray-session/telemetry',
+  heartbeatMs: 5000,
+  requestTimeoutMs: 1800,
+});
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
 
 function directOriginConfig() {
@@ -69,7 +78,9 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
-      build: 'graceful-drain-relay-v7',
+      concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
+      concurrencyGuardRoute: V2_SESSION_GUARD.route,
+      build: 'graceful-drain-relay-v7-concurrency-guard',
       now: new Date().toISOString(),
     });
   }
@@ -371,8 +382,17 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
         encoding: null,
         highWaterMark: 1024 * 1024,
       });
+      clientStream.pause();
 
-      bridgeStreams(clientStream, origin, closeAll);
+      V2_SESSION_GUARD.authorizeStream(clientStream, ws, req)
+        .then((decision) => {
+          if (!decision || !decision.ok || closed) {
+            closeAll();
+            return;
+          }
+          bridgeStreams(clientStream, origin, closeAll);
+        })
+        .catch(closeAll);
     });
   });
 
