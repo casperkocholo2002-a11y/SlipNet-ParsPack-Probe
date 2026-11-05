@@ -90,7 +90,8 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-isolated-v1',
+      build: 'arvan-direct-grouped-v6',
+      directRelayImpl: 'native-websocket-grouped-v6',
       now: new Date().toISOString(),
     });
   }
@@ -421,58 +422,170 @@ function handleDirectRelayWebSocket(req, socket, head) {
     return rejectUpgrade(socket);
   }
 
-  let client = null;
-  let clientStream = null;
-  let backendStream = null;
-  let closed = false;
+  const DIRECT_FRAME_CHUNK = 32 * 1024;
+  const DIRECT_PENDING_MAX = 2 * 1024 * 1024;
 
-  const backend = new WebSocket(directOriginUrl(d), {
-    perMessageDeflate: false,
-    handshakeTimeout: 15000,
-    maxPayload: MAX_WS,
-  });
+  let client = null;
+  let closed = false;
+  let backendReady = false;
+  let authorized = false;
+  let authStarted = false;
+  let header = Buffer.alloc(0);
+  let pending = [];
+  let pendingBytes = 0;
+  let clientToBackend = Promise.resolve();
+  let backendToClient = Promise.resolve();
+
+  const NativeWebSocket = globalThis.WebSocket;
+  if (typeof NativeWebSocket !== 'function') {
+    return rejectUpgrade(socket);
+  }
+
+  const backend = new NativeWebSocket(directOriginUrl(d));
+  backend.binaryType = 'arraybuffer';
+  const backendOpenTimer = setTimeout(() => {
+    if (!backendReady) closeAll();
+  }, 15000);
 
   const closeAll = () => {
     if (closed) return;
     closed = true;
-    try { clientStream && clientStream.destroy(); } catch {}
-    try { backendStream && backendStream.destroy(); } catch {}
+    pending = [];
+    pendingBytes = 0;
+    clearTimeout(backendOpenTimer);
     try { client && client.terminate(); } catch {}
-    try { backend.terminate(); } catch {}
+    try { backend.close(); } catch {}
     try { if (!client) socket.destroy(); } catch {}
   };
 
-  backend.once('open', () => {
-    try { tuneSocket(backend._socket); } catch {}
+  const sendChunked = async (ws, data, native = false) => {
+    if (!ws || ws.readyState !== 1) {
+      throw new Error('websocket_not_open');
+    }
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    for (let offset = 0; offset < buf.length; offset += DIRECT_FRAME_CHUNK) {
+      if (ws.readyState !== 1) {
+        throw new Error('websocket_closed_during_send');
+      }
+      const chunk = buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK));
+      if (native) ws.send(chunk);
+      else ws.send(chunk, {binary: true, compress: false});
+      if (ws.bufferedAmount > DIRECT_PENDING_MAX) {
+        await new Promise((resolve, reject) => {
+          const started = Date.now();
+          const poll = () => {
+            if (ws.readyState !== WebSocket.OPEN) {
+              reject(new Error('websocket_closed_during_backpressure'));
+              return;
+            }
+            if (ws.bufferedAmount <= DIRECT_PENDING_MAX / 2) {
+              resolve();
+              return;
+            }
+            if (Date.now() - started >= 5000) {
+              reject(new Error('websocket_backpressure_timeout'));
+              return;
+            }
+            setTimeout(poll, 5);
+          };
+          poll();
+        });
+      }
+    }
+  };
 
-    acceptWebSocket(req, socket, head, (ws) => {
-      client = ws;
-      clientStream = createWebSocketStream(ws, {
-        encoding: null,
-        highWaterMark: 1024 * 1024,
-      });
-      backendStream = createWebSocketStream(backend, {
-        encoding: null,
-        highWaterMark: 1024 * 1024,
-      });
+  const flushPending = () => {
+    if (!authorized || !backendReady || closed || !pending.length) return;
+    const frames = pending;
+    pending = [];
+    pendingBytes = 0;
+    for (const frame of frames) {
+      clientToBackend = clientToBackend
+        .then(() => sendChunked(backend, frame, true))
+        .catch(closeAll);
+    }
+  };
 
-      clientStream.pause();
-      DIRECT_SESSION_GUARD.authorizeStream(clientStream, ws, req)
-        .then((decision) => {
-          if (!decision || !decision.ok || closed) {
-            closeAll();
-            return;
-          }
-          bridgeStreams(clientStream, backendStream, closeAll);
-        })
+  const startAuthorization = () => {
+    if (authStarted || header.length < 17 || !client || closed) return;
+    authStarted = true;
+    DIRECT_SESSION_GUARD.authorizeHeader(header.subarray(0, 17), client, req)
+      .then((decision) => {
+        if (!decision || !decision.ok || closed) {
+          closeAll();
+          return;
+        }
+        authorized = true;
+        flushPending();
+      })
+      .catch(closeAll);
+  };
+
+  acceptWebSocket(req, socket, head, (ws) => {
+    client = ws;
+
+    ws.on('message', (data, isBinary) => {
+      if (closed || !isBinary) {
+        closeAll();
+        return;
+      }
+
+      const frame = Buffer.from(data);
+
+      if (!authorized) {
+        pendingBytes += frame.length;
+        if (pendingBytes > DIRECT_PENDING_MAX) {
+          closeAll();
+          return;
+        }
+        pending.push(frame);
+
+        if (header.length < 17) {
+          const need = 17 - header.length;
+          header = Buffer.concat([header, frame.subarray(0, need)]);
+        }
+        startAuthorization();
+        return;
+      }
+
+      if (!backendReady) {
+        pendingBytes += frame.length;
+        if (pendingBytes > DIRECT_PENDING_MAX) {
+          closeAll();
+          return;
+        }
+        pending.push(frame);
+        return;
+      }
+
+      clientToBackend = clientToBackend
+        .then(() => sendChunked(backend, frame, true))
         .catch(closeAll);
     });
+
+    ws.once('close', closeAll);
+    ws.once('error', closeAll);
   });
 
-  backend.once('error', () => {
-    if (!client) rejectUpgrade(socket, '502 Bad Gateway');
-    closeAll();
+  backend.addEventListener('open', () => {
+    clearTimeout(backendOpenTimer);
+    backendReady = true;
+    flushPending();
+  }, {once: true});
+
+  backend.addEventListener('message', (event) => {
+    if (closed || !client || typeof event.data === 'string') {
+      closeAll();
+      return;
+    }
+    const frame = Buffer.from(event.data);
+    backendToClient = backendToClient
+      .then(() => sendChunked(client, frame, false))
+      .catch(closeAll);
   });
+
+  backend.addEventListener('close', closeAll, {once: true});
+  backend.addEventListener('error', closeAll, {once: true});
   socket.once('error', closeAll);
   socket.once('close', () => { if (!client) closeAll(); });
 }
