@@ -90,8 +90,8 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-frame-v3',
-      directRelayImpl: 'frame-pipeline-v3',
+      build: 'arvan-direct-native-v5',
+      directRelayImpl: 'native-websocket-v5',
       now: new Date().toISOString(),
     });
   }
@@ -436,35 +436,40 @@ function handleDirectRelayWebSocket(req, socket, head) {
   let clientToBackend = Promise.resolve();
   let backendToClient = Promise.resolve();
 
-  const backend = new WebSocket(directOriginUrl(d), {
-    perMessageDeflate: false,
-    handshakeTimeout: 15000,
-    maxPayload: MAX_WS,
-  });
+  const NativeWebSocket = globalThis.WebSocket;
+  if (typeof NativeWebSocket !== 'function') {
+    return rejectUpgrade(socket);
+  }
+
+  const backend = new NativeWebSocket(directOriginUrl(d));
+  backend.binaryType = 'arraybuffer';
+  const backendOpenTimer = setTimeout(() => {
+    if (!backendReady) closeAll();
+  }, 15000);
 
   const closeAll = () => {
     if (closed) return;
     closed = true;
     pending = [];
     pendingBytes = 0;
+    clearTimeout(backendOpenTimer);
     try { client && client.terminate(); } catch {}
-    try { backend.terminate(); } catch {}
+    try { backend.close(); } catch {}
     try { if (!client) socket.destroy(); } catch {}
   };
 
-  const sendChunked = async (ws, data) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+  const sendChunked = async (ws, data, native = false) => {
+    if (!ws || ws.readyState !== 1) {
       throw new Error('websocket_not_open');
     }
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
     for (let offset = 0; offset < buf.length; offset += DIRECT_FRAME_CHUNK) {
-      if (ws.readyState !== WebSocket.OPEN) {
+      if (ws.readyState !== 1) {
         throw new Error('websocket_closed_during_send');
       }
-      ws.send(
-        buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK)),
-        {binary: true, compress: false}
-      );
+      const chunk = buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK));
+      if (native) ws.send(chunk);
+      else ws.send(chunk, {binary: true, compress: false});
       if (ws.bufferedAmount > DIRECT_PENDING_MAX) {
         await new Promise((resolve, reject) => {
           const started = Date.now();
@@ -496,7 +501,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
     pendingBytes = 0;
     for (const frame of frames) {
       clientToBackend = clientToBackend
-        .then(() => sendChunked(backend, frame))
+        .then(() => sendChunked(backend, frame, true))
         .catch(closeAll);
     }
   };
@@ -554,7 +559,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
       }
 
       clientToBackend = clientToBackend
-        .then(() => sendChunked(backend, frame))
+        .then(() => sendChunked(backend, frame, true))
         .catch(closeAll);
     });
 
@@ -562,25 +567,25 @@ function handleDirectRelayWebSocket(req, socket, head) {
     ws.once('error', closeAll);
   });
 
-  backend.once('open', () => {
-    try { tuneSocket(backend._socket); } catch {}
+  backend.addEventListener('open', () => {
+    clearTimeout(backendOpenTimer);
     backendReady = true;
     flushPending();
-  });
+  }, {once: true});
 
-  backend.on('message', (data, isBinary) => {
-    if (closed || !isBinary || !client) {
+  backend.addEventListener('message', (event) => {
+    if (closed || !client || typeof event.data === 'string') {
       closeAll();
       return;
     }
-    const frame = Buffer.from(data);
+    const frame = Buffer.from(event.data);
     backendToClient = backendToClient
-      .then(() => sendChunked(client, frame))
+      .then(() => sendChunked(client, frame, false))
       .catch(closeAll);
   });
 
-  backend.once('close', closeAll);
-  backend.once('error', closeAll);
+  backend.addEventListener('close', closeAll, {once: true});
+  backend.addEventListener('error', closeAll, {once: true});
   socket.once('error', closeAll);
   socket.once('close', () => { if (!client) closeAll(); });
 }
