@@ -139,14 +139,126 @@ function createSessionGuard(options = {}) {
     return postTelemetry(telemetryUrl, payload, requestTimeoutMs);
   }
 
-  async function authorizeStream(stream, ws, req) {
+  const sessionGroups = new Map();
+
+  function stopGroup(key, group) {
+    if (!group || group.stopped) return;
+    group.stopped = true;
+    if (group.timer) clearInterval(group.timer);
+    if (sessionGroups.get(key) === group) sessionGroups.delete(key);
+    emit(group.meta, 'close').catch(() => {});
+  }
+
+  function startGroupHeartbeat(key, group) {
+    if (group.timer || group.stopped) return;
+    group.timer = setInterval(async () => {
+      if (group.stopped || group.heartbeatRunning || group.sockets.size === 0) return;
+      group.heartbeatRunning = true;
+      try {
+        let state = await emit(group.meta, 'heartbeat');
+        if (!group.stopped && state && state.known && state.session_known === false) {
+          state = await emit(group.meta, 'open');
+        }
+        if (state && state.locked) {
+          group.locked = true;
+          for (const socket of [...group.sockets]) {
+            try { socket.terminate(); } catch {}
+          }
+          stopGroup(key, group);
+        }
+      } finally {
+        group.heartbeatRunning = false;
+      }
+    }, heartbeatMs);
+    if (group.timer.unref) group.timer.unref();
+  }
+
+  async function authorizeHeader(header, ws, req) {
     if (!enabled) return {ok: true, guarded: false};
 
     const ip = sourceIp(req, route);
     if (!ip) {
-      // Fail open if the platform does not expose a usable client IP.
       return {ok: true, guarded: false, reason: 'source_ip_unavailable'};
     }
+
+    const uuid = uuidFromHeader(header);
+    if (!uuid) {
+      return {ok: false, guarded: true, reason: 'invalid_vless_uuid'};
+    }
+
+    const hash = uuidHash(uuid);
+    const key = hash + '|' + ip;
+    let group = sessionGroups.get(key);
+
+    if (!group || group.stopped) {
+      const meta = {
+        uuid,
+        hash,
+        ip,
+        sessionId: crypto.randomBytes(12).toString('hex'),
+      };
+      group = {
+        meta,
+        sockets: new Set(),
+        timer: null,
+        heartbeatRunning: false,
+        stopped: false,
+        locked: false,
+        decision: null,
+        authPromise: null,
+      };
+      group.authPromise = (async () => {
+        const opened = await emit(meta, 'open');
+        if (opened && opened.locked) {
+          group.locked = true;
+          group.decision = {
+            ok: false,
+            guarded: true,
+            reason: opened.reason || 'concurrency_locked',
+            activeSources: Number(opened.active_sources || 0),
+          };
+          return group.decision;
+        }
+
+        group.decision = {
+          ok: true,
+          guarded: true,
+          activeSources: opened ? Number(opened.active_sources || 0) : null,
+        };
+        startGroupHeartbeat(key, group);
+        return group.decision;
+      })();
+      sessionGroups.set(key, group);
+    }
+
+    group.sockets.add(ws);
+    let detached = false;
+    const detach = () => {
+      if (detached) return;
+      detached = true;
+      group.sockets.delete(ws);
+      if (group.sockets.size === 0) {
+        stopGroup(key, group);
+      }
+    };
+    ws.once('close', detach);
+    ws.once('error', detach);
+
+    const decision = group.decision || await group.authPromise;
+    if (!decision || !decision.ok || group.locked || group.stopped) {
+      detach();
+      return decision || {
+        ok: false,
+        guarded: true,
+        reason: group.locked ? 'concurrency_locked' : 'guard_stopped',
+      };
+    }
+
+    return decision;
+  }
+
+  async function authorizeStream(stream, ws, req) {
+    if (!enabled) return {ok: true, guarded: false};
 
     let header;
     try {
@@ -155,71 +267,14 @@ function createSessionGuard(options = {}) {
     } catch {
       return {ok: false, guarded: true, reason: 'invalid_vless_header'};
     }
-
-    const uuid = uuidFromHeader(header);
-    if (!uuid) {
-      return {ok: false, guarded: true, reason: 'invalid_vless_uuid'};
-    }
-
-    const meta = {
-      uuid,
-      hash: uuidHash(uuid),
-      ip,
-      sessionId: crypto.randomBytes(12).toString('hex'),
-    };
-    const opened = await emit(meta, 'open');
-
-    // Telemetry outages must not become connectivity outages.
-    if (opened && opened.locked) {
-      return {
-        ok: false,
-        guarded: true,
-        reason: opened.reason || 'concurrency_locked',
-        activeSources: Number(opened.active_sources || 0),
-      };
-    }
-
-    let stopped = false;
-    let heartbeatRunning = false;
-    const stop = () => {
-      if (stopped) return;
-      stopped = true;
-      clearInterval(timer);
-      emit(meta, 'close').catch(() => {});
-    };
-
-    const timer = setInterval(async () => {
-      if (stopped || heartbeatRunning) return;
-      heartbeatRunning = true;
-      try {
-        let state = await emit(meta, 'heartbeat');
-        if (!stopped && state && state.known && state.session_known === false) {
-          state = await emit(meta, 'open');
-        }
-        if (state && state.locked) {
-          stop();
-          try { ws.terminate(); } catch {}
-        }
-      } finally {
-        heartbeatRunning = false;
-      }
-    }, heartbeatMs);
-
-    if (timer.unref) timer.unref();
-    ws.once('close', stop);
-    ws.once('error', stop);
-
-    return {
-      ok: true,
-      guarded: true,
-      activeSources: opened ? Number(opened.active_sources || 0) : null,
-    };
+    return authorizeHeader(header, ws, req);
   }
 
   return {
     enabled,
     route,
     telemetryUrl,
+    authorizeHeader,
     authorizeStream,
   };
 }
