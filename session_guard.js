@@ -139,21 +139,12 @@ function createSessionGuard(options = {}) {
     return postTelemetry(telemetryUrl, payload, requestTimeoutMs);
   }
 
-  async function authorizeStream(stream, ws, req) {
+  async function authorizeHeader(header, ws, req) {
     if (!enabled) return {ok: true, guarded: false};
 
     const ip = sourceIp(req, route);
     if (!ip) {
-      // Fail open if the platform does not expose a usable client IP.
       return {ok: true, guarded: false, reason: 'source_ip_unavailable'};
-    }
-
-    let header;
-    try {
-      stream.pause();
-      header = await waitForBytes(stream, 17, 5000);
-    } catch {
-      return {ok: false, guarded: true, reason: 'invalid_vless_header'};
     }
 
     const uuid = uuidFromHeader(header);
@@ -169,7 +160,6 @@ function createSessionGuard(options = {}) {
     };
     const opened = await emit(meta, 'open');
 
-    // Telemetry outages must not become connectivity outages.
     if (opened && opened.locked) {
       return {
         ok: false,
@@ -216,10 +206,24 @@ function createSessionGuard(options = {}) {
     };
   }
 
+  async function authorizeStream(stream, ws, req) {
+    if (!enabled) return {ok: true, guarded: false};
+
+    let header;
+    try {
+      stream.pause();
+      header = await waitForBytes(stream, 17, 5000);
+    } catch {
+      return {ok: false, guarded: true, reason: 'invalid_vless_header'};
+    }
+    return authorizeHeader(header, ws, req);
+  }
+
   return {
     enabled,
     route,
     telemetryUrl,
+    authorizeHeader,
     authorizeStream,
   };
 }
