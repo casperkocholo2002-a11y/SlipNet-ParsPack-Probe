@@ -21,7 +21,7 @@ function normalizeIp(raw, forwarded = false) {
 function sourceIp(req, route = '') {
   const h = (req && req.headers) || {};
   const r = String(route || '').trim().toLowerCase();
-  const candidates = r === 'arvan'
+  const candidates = (r === 'arvan' || r.startsWith('direct-'))
     ? [
         h['ar-real-ip'],
         h['x-client-ip'],

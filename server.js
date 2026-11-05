@@ -25,6 +25,15 @@ const V2_SESSION_GUARD = createSessionGuard({
   requestTimeoutMs: 1800,
 });
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
+const DIRECT_GUARD_ROUTE = envValue('DIRECT_GUARD_ROUTE', 'directguardroute') || 'direct-r1';
+const DIRECT_SESSION_GUARD = createSessionGuard({
+  route: DIRECT_GUARD_ROUTE,
+  telemetryUrl:
+    envValue('DIRECT_SESSION_TELEMETRY_URL', 'directsessiontelemetryurl') ||
+    'https://monitor.reoos.ir/api/direct-session/telemetry',
+  heartbeatMs: 5000,
+  requestTimeoutMs: 1800,
+});
 
 function directOriginConfig() {
   const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
@@ -78,9 +87,10 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
+      directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'graceful-drain-relay-v7-concurrency-guard',
+      build: 'arvan-direct-isolated-v1',
       now: new Date().toISOString(),
     });
   }
@@ -446,7 +456,16 @@ function handleDirectRelayWebSocket(req, socket, head) {
         highWaterMark: 1024 * 1024,
       });
 
-      bridgeStreams(clientStream, backendStream, closeAll);
+      clientStream.pause();
+      DIRECT_SESSION_GUARD.authorizeStream(clientStream, ws, req)
+        .then((decision) => {
+          if (!decision || !decision.ok || closed) {
+            closeAll();
+            return;
+          }
+          bridgeStreams(clientStream, backendStream, closeAll);
+        })
+        .catch(closeAll);
     });
   });
 
