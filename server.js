@@ -90,8 +90,8 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-frame-v2',
-      directRelayImpl: 'frame-forward-v2',
+      build: 'arvan-direct-frame-v3',
+      directRelayImpl: 'frame-pipeline-v3',
       now: new Date().toISOString(),
     });
   }
@@ -452,18 +452,40 @@ function handleDirectRelayWebSocket(req, socket, head) {
     try { if (!client) socket.destroy(); } catch {}
   };
 
-  const sendOne = (ws, data) => new Promise((resolve, reject) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      reject(new Error('websocket_not_open'));
-      return;
-    }
-    ws.send(data, {binary: true, compress: false}, (err) => err ? reject(err) : resolve());
-  });
-
   const sendChunked = async (ws, data) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error('websocket_not_open');
+    }
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
     for (let offset = 0; offset < buf.length; offset += DIRECT_FRAME_CHUNK) {
-      await sendOne(ws, buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK)));
+      if (ws.readyState !== WebSocket.OPEN) {
+        throw new Error('websocket_closed_during_send');
+      }
+      ws.send(
+        buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK)),
+        {binary: true, compress: false}
+      );
+      if (ws.bufferedAmount > DIRECT_PENDING_MAX) {
+        await new Promise((resolve, reject) => {
+          const started = Date.now();
+          const poll = () => {
+            if (ws.readyState !== WebSocket.OPEN) {
+              reject(new Error('websocket_closed_during_backpressure'));
+              return;
+            }
+            if (ws.bufferedAmount <= DIRECT_PENDING_MAX / 2) {
+              resolve();
+              return;
+            }
+            if (Date.now() - started >= 5000) {
+              reject(new Error('websocket_backpressure_timeout'));
+              return;
+            }
+            setTimeout(poll, 5);
+          };
+          poll();
+        });
+      }
     }
   };
 
