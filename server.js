@@ -36,6 +36,14 @@ const DIRECT_SESSION_GUARD = createSessionGuard({
 });
 
 function directOriginConfig() {
+  if (DIRECT_GUARD_ROUTE === 'direct-r2') {
+    return {
+      host: 'slipnet-arvan-r2e-20261106000007-6a6c20.edgecache-628bbe41dc.workers.dev',
+      port: 443,
+      servername: 'slipnet-arvan-r2e-20261106000007-6a6c20.edgecache-628bbe41dc.workers.dev',
+      path: '/a/r2e/85f054cc0d7117c33a7cc594054fe038e2c98f1a469f321a',
+    };
+  }
   const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
   const port = Number(envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0);
   const servername = envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername');
@@ -90,8 +98,8 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-grouped-v6',
-      directRelayImpl: 'native-websocket-grouped-v6',
+      build: 'arvan-direct-edgecache-v7',
+      directRelayImpl: 'native-websocket-edgecache-v7',
       now: new Date().toISOString(),
     });
   }
