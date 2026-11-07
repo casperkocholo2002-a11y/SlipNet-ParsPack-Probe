@@ -62,27 +62,10 @@ func newSessionGuard(route string) *sessionGuard {
 	}
 }
 
-func normalizeIP(raw string, forwarded bool) string {
+func normalizeIP(raw string) string {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		return ""
-	}
-	if strings.Contains(value, ",") {
-		parts := strings.Split(value, ",")
-		clean := make([]string, 0, len(parts))
-		for _, p := range parts {
-			if p = strings.TrimSpace(p); p != "" {
-				clean = append(clean, p)
-			}
-		}
-		if len(clean) == 0 {
-			return ""
-		}
-		if forwarded {
-			value = clean[len(clean)-1]
-		} else {
-			value = clean[0]
-		}
 	}
 	if strings.HasPrefix(value, "::ffff:") {
 		value = strings.TrimPrefix(value, "::ffff:")
@@ -100,41 +83,87 @@ func normalizeIP(raw string, forwarded bool) string {
 	return ip.String()
 }
 
+func ipCandidates(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if ip := normalizeIP(part); ip != "" {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func isNonPublicIP(raw string) bool {
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return true
+	}
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// Carrier-grade NAT 100.64.0.0/10 is not globally routable.
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+		// Benchmarking range 198.18.0.0/15.
+		if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) {
+			return true
+		}
+	}
+	return false
+}
+
 func sourceIP(r *http.Request, route string) string {
 	if r == nil {
 		return ""
 	}
 	h := r.Header
-	type candidate struct {
-		value     string
-		forwarded bool
-	}
-	var candidates []candidate
+	var ordered []string
 	if strings.EqualFold(strings.TrimSpace(route), "arvan") {
-		candidates = []candidate{
-			{h.Get("ar-real-ip"), false},
-			{h.Get("x-client-ip"), false},
-			{h.Get("x-real-ip"), false},
-			{h.Get("x-forwarded-for"), true},
+		ordered = []string{
+			h.Get("ar-real-ip"),
+			h.Get("x-client-ip"),
+			h.Get("x-real-ip"),
+			h.Get("x-forwarded-for"),
 		}
 	} else {
-		candidates = []candidate{
-			{h.Get("x-real-ip"), false},
-			{h.Get("x-forwarded-for"), true},
-			{h.Get("x-client-ip"), false},
-			{h.Get("ar-real-ip"), false},
+		ordered = []string{
+			h.Get("x-real-ip"),
+			h.Get("x-forwarded-for"),
+			h.Get("x-client-ip"),
+			h.Get("ar-real-ip"),
 		}
 	}
-	for _, c := range candidates {
-		if ip := normalizeIP(c.value, c.forwarded); ip != "" {
-			return ip
-		}
-	}
+
 	host := strings.TrimSpace(r.RemoteAddr)
 	if splitHost, _, err := net.SplitHostPort(host); err == nil {
 		host = splitHost
 	}
-	return normalizeIP(host, false)
+	ordered = append(ordered, host)
+
+	candidates := make([]string, 0, 8)
+	seen := map[string]bool{}
+	for _, raw := range ordered {
+		for _, ip := range ipCandidates(raw) {
+			if !seen[ip] {
+				seen[ip] = true
+				candidates = append(candidates, ip)
+			}
+		}
+	}
+
+	for _, ip := range candidates {
+		if !isNonPublicIP(ip) {
+			return ip
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
 }
 
 func uuidFromHeader(header []byte) string {

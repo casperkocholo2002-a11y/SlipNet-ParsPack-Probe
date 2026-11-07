@@ -11,20 +11,17 @@ import (
 
 func TestNormalizeIP(t *testing.T) {
 	tests := []struct {
-		raw       string
-		forwarded bool
-		want      string
+		raw  string
+		want string
 	}{
-		{"1.2.3.4", false, "1.2.3.4"},
-		{"::ffff:1.2.3.4", false, "1.2.3.4"},
-		{"2001:db8::1", false, "2001:db8::1"},
-		{"1.1.1.1, 2.2.2.2", false, "1.1.1.1"},
-		{"1.1.1.1, 2.2.2.2", true, "2.2.2.2"},
-		{"not-an-ip", false, ""},
+		{"1.2.3.4", "1.2.3.4"},
+		{"::ffff:1.2.3.4", "1.2.3.4"},
+		{"2001:db8::1", "2001:db8::1"},
+		{"not-an-ip", ""},
 	}
 	for _, tt := range tests {
-		if got := normalizeIP(tt.raw, tt.forwarded); got != tt.want {
-			t.Fatalf("normalizeIP(%q,%v)=%q want %q", tt.raw, tt.forwarded, got, tt.want)
+		if got := normalizeIP(tt.raw); got != tt.want {
+			t.Fatalf("normalizeIP(%q)=%q want %q", tt.raw, got, tt.want)
 		}
 	}
 }
@@ -55,7 +52,7 @@ func TestSourceIPParsPackOrder(t *testing.T) {
 	}
 
 	r.Header.Del("X-Real-IP")
-	if got := sourceIP(r, "parspack"); got != "198.51.100.2" {
+	if got := sourceIP(r, "parspack"); got != "198.51.100.1" {
 		t.Fatalf("xff sourceIP=%q", got)
 	}
 }
@@ -112,5 +109,25 @@ func TestTelemetryFallback(t *testing.T) {
 	}
 	if primaryCalls != 1 || fallbackCalls != 1 {
 		t.Fatalf("unexpected call counts primary=%d fallback=%d", primaryCalls, fallbackCalls)
+	}
+}
+
+func TestSourceIPPrefersPublicOverInternalProxy(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodGet, "http://example.test/tunnel", nil)
+	r.RemoteAddr = "10.0.0.8:1234"
+	r.Header.Set("X-Real-IP", "192.168.4.104")
+	r.Header.Set("X-Forwarded-For", "5.215.0.222, 192.168.4.104")
+	if got := sourceIP(r, "parspack"); got != "5.215.0.222" {
+		t.Fatalf("sourceIP=%q want public client IP", got)
+	}
+}
+
+func TestSourceIPArvanPrefersPublicXFFWhenARRealIPIsInternal(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodGet, "http://example.test/tunnel", nil)
+	r.RemoteAddr = "10.0.0.9:1234"
+	r.Header.Set("AR-Real-IP", "192.168.4.104")
+	r.Header.Set("X-Forwarded-For", "86.55.28.75, 192.168.4.104")
+	if got := sourceIP(r, "arvan"); got != "86.55.28.75" {
+		t.Fatalf("sourceIP=%q want public client IP", got)
 	}
 }
