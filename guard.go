@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
-	"net/http"
 	"strings"
 	"time"
 )
