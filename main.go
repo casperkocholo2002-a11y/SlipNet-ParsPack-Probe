@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -30,7 +31,7 @@ const (
 	maxEcho   = 16 * 1024 * 1024
 	maxStream = 8 * 1024 * 1024
 	maxWS     = 1024 * 1024
-	buildID   = "go-green-v4-realip-guard"
+	buildID   = "go-green-v5-realip-diag"
 )
 
 type app struct {
@@ -230,6 +231,45 @@ func dialPrimaryOrigin() (net.Conn, error) {
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
 	return tlsConn, nil
+}
+
+func (a *app) realIPDiag(w http.ResponseWriter, r *http.Request) {
+	want := strings.TrimSpace(os.Getenv("REALIP_DIAG_TOKEN"))
+	if want == "" {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "not_found"})
+		return
+	}
+	got := strings.TrimSpace(r.Header.Get("X-RealIP-Diag-Token"))
+	if len(got) != len(want) || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+		return
+	}
+	keys := []string{
+		"Forwarded",
+		"X-Forwarded-For",
+		"X-Original-Forwarded-For",
+		"X-Real-IP",
+		"X-Client-IP",
+		"X-Envoy-External-Address",
+		"X-Cluster-Client-IP",
+		"True-Client-IP",
+		"CF-Connecting-IP",
+		"Fly-Client-IP",
+	}
+	headers := map[string]string{}
+	for _, key := range keys {
+		if v := strings.TrimSpace(r.Header.Get(key)); v != "" {
+			headers[key] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"build":       buildID,
+		"route":       a.guard.route,
+		"selected_ip": sourceIP(r, a.guard.route),
+		"remote_addr": r.RemoteAddr,
+		"headers":     headers,
+	})
 }
 
 func (a *app) health(w http.ResponseWriter, r *http.Request) {
@@ -647,6 +687,8 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/health":
 		a.health(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/__realip":
+		a.realIPDiag(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/origin-check":
 		a.originCheck(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/direct-origin-check":
