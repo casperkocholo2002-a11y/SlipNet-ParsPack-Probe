@@ -80,7 +80,7 @@ const server = http.createServer((req, res) => {
       directRelayMode: 'wss',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'graceful-drain-relay-v7-concurrency-guard',
+      build: 'graceful-drain-relay-v8-realip-guard',
       now: new Date().toISOString(),
     });
   }

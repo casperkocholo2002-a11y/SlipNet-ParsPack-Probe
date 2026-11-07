@@ -5,23 +5,49 @@ const net = require('net');
 
 const DEFAULT_URL = 'https://monitor.reoos.ir/api/v2ray-session/telemetry';
 
-function normalizeIp(raw, forwarded = false) {
+function normalizeIp(raw) {
   let value = String(raw || '').trim();
   if (!value) return '';
-  if (value.includes(',')) {
-    const parts = value.split(',').map((x) => x.trim()).filter(Boolean);
-    value = forwarded ? (parts[parts.length - 1] || '') : (parts[0] || '');
-  }
   if (value.startsWith('::ffff:')) value = value.slice(7);
   const zone = value.indexOf('%');
   if (zone !== -1) value = value.slice(0, zone);
   return net.isIP(value) ? value : '';
 }
 
+function ipCandidates(raw) {
+  return String(raw || '')
+    .split(',')
+    .map((x) => normalizeIp(x))
+    .filter(Boolean);
+}
+
+function isNonPublicIp(ip) {
+  const kind = net.isIP(ip);
+  if (kind === 4) {
+    const p = ip.split('.').map(Number);
+    if (p[0] === 10 || p[0] === 127 || p[0] === 0) return true;
+    if (p[0] === 169 && p[1] === 254) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true;
+    if (p[0] === 198 && (p[1] === 18 || p[1] === 19)) return true;
+    if (p[0] >= 224) return true;
+    return false;
+  }
+  if (kind === 6) {
+    const v = ip.toLowerCase();
+    if (v === '::' || v === '::1') return true;
+    if (v.startsWith('fc') || v.startsWith('fd')) return true;
+    if (/^fe[89ab]/.test(v)) return true;
+    return false;
+  }
+  return true;
+}
+
 function sourceIp(req, route = '') {
   const h = (req && req.headers) || {};
   const r = String(route || '').trim().toLowerCase();
-  const candidates = r === 'arvan'
+  const ordered = (r === 'arvan' || r.startsWith('direct-'))
     ? [
         h['ar-real-ip'],
         h['x-client-ip'],
@@ -36,12 +62,17 @@ function sourceIp(req, route = '') {
         h['ar-real-ip'],
         req && req.socket && req.socket.remoteAddress,
       ];
-  for (const candidate of candidates) {
-    const forwarded = candidate === h['x-forwarded-for'];
-    const ip = normalizeIp(candidate, forwarded);
-    if (ip) return ip;
+
+  const candidates = [];
+  for (const raw of ordered) {
+    for (const ip of ipCandidates(raw)) {
+      if (!candidates.includes(ip)) candidates.push(ip);
+    }
   }
-  return '';
+
+  const publicIp = candidates.find((ip) => !isNonPublicIp(ip));
+  if (publicIp) return publicIp;
+  return candidates[0] || '';
 }
 
 function uuidFromHeader(header) {
