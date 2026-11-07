@@ -170,6 +170,42 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/parspack-front-test-diag') {
+    const p = parspackFrontConfig();
+    const ip = sourceIp(req, 'arvan');
+
+    if (
+      !ip ||
+      !p.host ||
+      !Number.isInteger(p.port) ||
+      p.port < 1 ||
+      p.port > 65535 ||
+      p.secret.length < 32
+    ) {
+      return json(res, 503, { ok: false, error: 'signed_realip_front_not_ready' });
+    }
+
+    const authority = p.port === 443 ? p.host : p.host + ':' + p.port;
+    const target = 'https://' + authority + '/diag/realip';
+
+    fetch(target, {
+      headers: signedRealIpHeaders(ip, p.secret),
+      signal: AbortSignal.timeout(5000),
+    })
+      .then(async (upstream) => {
+        const body = await upstream.json();
+        json(res, upstream.ok ? 200 : 502, {
+          ok: upstream.ok,
+          frontSourceIp: ip,
+          backend: body,
+        });
+      })
+      .catch(() => {
+        json(res, 502, { ok: false, error: 'signed_realip_backend_unreachable' });
+      });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/origin-check') {
     const targetHost = envValue('ORIGIN_HOST', 'originhost');
     const targetPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
