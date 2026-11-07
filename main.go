@@ -30,7 +30,7 @@ const (
 	maxEcho   = 16 * 1024 * 1024
 	maxStream = 8 * 1024 * 1024
 	maxWS     = 1024 * 1024
-	buildID   = "go-green-v4-realip-guard"
+	buildID   = "go-green-v5-signed-realip-guard"
 )
 
 type app struct {
@@ -253,6 +253,7 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 		"workerRelayMode":         "wss",
 		"concurrencyGuardEnabled": a.guard.enabled,
 		"concurrencyGuardRoute":   a.guard.route,
+		"signedRealIPBridge":      len(strings.TrimSpace(os.Getenv("REALIP_BRIDGE_SECRET"))) >= 32,
 		"build":                   buildID,
 		"now":                     time.Now().UTC().Format(time.RFC3339Nano),
 	})
