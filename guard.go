@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strconv"
 	"net/http"
 	"strings"
 	"time"
@@ -116,9 +118,41 @@ func isNonPublicIP(raw string) bool {
 	return false
 }
 
+func signedBridgeIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	secret := strings.TrimSpace(os.Getenv("REALIP_BRIDGE_SECRET"))
+	if len(secret) < 32 {
+		return ""
+	}
+	rawIP := strings.TrimSpace(r.Header.Get("X-SlipNet-Real-IP"))
+	tsRaw := strings.TrimSpace(r.Header.Get("X-SlipNet-Real-IP-Ts"))
+	proof := strings.ToLower(strings.TrimSpace(r.Header.Get("X-SlipNet-Real-IP-Proof")))
+	ip := normalizeIP(rawIP)
+	if ip == "" || isNonPublicIP(ip) || proof == "" {
+		return ""
+	}
+	ts, err := strconv.ParseInt(tsRaw, 10, 64)
+	if err != nil || time.Now().Unix()-ts > 30 || ts-time.Now().Unix() > 30 {
+		return ""
+	}
+	msg := ip + "|" + tsRaw
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(msg))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(proof)) {
+		return ""
+	}
+	return ip
+}
+
 func sourceIP(r *http.Request, route string) string {
 	if r == nil {
 		return ""
+	}
+	if ip := signedBridgeIP(r); ip != "" {
+		return ip
 	}
 	h := r.Header
 	var singles []string
