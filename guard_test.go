@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestNormalizeIP(t *testing.T) {
@@ -139,5 +141,37 @@ func TestSourceIPRejectsSpoofedLeftmostXFF(t *testing.T) {
 	r.Header.Set("X-Forwarded-For", "8.8.8.8, 5.215.242.49, 192.168.4.104")
 	if got := sourceIP(r, "parspack"); got != "5.215.242.49" {
 		t.Fatalf("sourceIP=%q want rightmost public client IP", got)
+	}
+}
+
+
+func TestSignedBridgeIPAccepted(t *testing.T) {
+	secret := "0123456789abcdef0123456789abcdef"
+	t.Setenv("REALIP_BRIDGE_SECRET", secret)
+	r, _ := http.NewRequest(http.MethodGet, "http://example.test/tunnel", nil)
+	ip := "5.215.0.222"
+	ts := time.Now().Unix()
+	msg := ip + "|" + strconv.FormatInt(ts, 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(msg))
+	r.Header.Set("X-SlipNet-Real-IP", ip)
+	r.Header.Set("X-SlipNet-Real-IP-Ts", strconv.FormatInt(ts, 10))
+	r.Header.Set("X-SlipNet-Real-IP-Proof", hex.EncodeToString(mac.Sum(nil)))
+	r.Header.Set("X-Forwarded-For", "192.168.4.104")
+	if got := sourceIP(r, "parspack"); got != ip {
+		t.Fatalf("sourceIP=%q want signed IP %q", got, ip)
+	}
+}
+
+func TestSignedBridgeIPRejectsBadProof(t *testing.T) {
+	t.Setenv("REALIP_BRIDGE_SECRET", "0123456789abcdef0123456789abcdef")
+	r, _ := http.NewRequest(http.MethodGet, "http://example.test/tunnel", nil)
+	r.Header.Set("X-SlipNet-Real-IP", "5.215.0.222")
+	r.Header.Set("X-SlipNet-Real-IP-Ts", strconv.FormatInt(time.Now().Unix(), 10))
+	r.Header.Set("X-SlipNet-Real-IP-Proof", "deadbeef")
+	r.Header.Set("X-Forwarded-For", "192.168.4.104")
+	r.RemoteAddr = "192.168.4.104:443"
+	if got := sourceIP(r, "parspack"); got != "192.168.4.104" {
+		t.Fatalf("sourceIP=%q want internal fallback when proof invalid", got)
 	}
 }
