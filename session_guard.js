@@ -238,6 +238,21 @@ function createSessionGuard(options = {}) {
       };
       group.authPromise = (async () => {
         const opened = await emit(meta, 'open');
+
+        // A UUID that Monitor does not know was never issued by the
+        // authoritative config registry. Reject it at the Arvan edge.
+        // Transport/Monitor failures still fail open so existing users are
+        // not disconnected merely because telemetry is temporarily down.
+        if (opened && opened.known === false) {
+          group.decision = {
+            ok: false,
+            guarded: true,
+            reason: opened.reason || 'unknown_monitor_config',
+            activeSources: 0,
+          };
+          return group.decision;
+        }
+
         if (opened && opened.locked) {
           group.locked = true;
           group.decision = {
