@@ -47,32 +47,30 @@ function isNonPublicIp(ip) {
 function sourceIp(req, route = '') {
   const h = (req && req.headers) || {};
   const r = String(route || '').trim().toLowerCase();
-  const ordered = (r === 'arvan' || r.startsWith('direct-'))
-    ? [
-        h['ar-real-ip'],
-        h['x-client-ip'],
-        h['x-real-ip'],
-        h['x-forwarded-for'],
-        req && req.socket && req.socket.remoteAddress,
-      ]
-    : [
-        h['x-real-ip'],
-        h['x-forwarded-for'],
-        h['x-client-ip'],
-        h['ar-real-ip'],
-        req && req.socket && req.socket.remoteAddress,
-      ];
 
-  const candidates = [];
-  for (const raw of ordered) {
+  const singleHeaders = (r === 'arvan' || r.startsWith('direct-'))
+    ? [h['ar-real-ip'], h['x-client-ip'], h['x-real-ip']]
+    : [h['x-real-ip'], h['x-client-ip'], h['ar-real-ip']];
+
+  const privateFallback = [];
+  for (const raw of singleHeaders) {
     for (const ip of ipCandidates(raw)) {
-      if (!candidates.includes(ip)) candidates.push(ip);
+      if (!isNonPublicIp(ip)) return ip;
+      if (!privateFallback.includes(ip)) privateFallback.push(ip);
     }
   }
 
-  const publicIp = candidates.find((ip) => !isNonPublicIp(ip));
-  if (publicIp) return publicIp;
-  return candidates[0] || '';
+  const forwarded = ipCandidates(h['x-forwarded-for']).reverse();
+  for (const ip of forwarded) {
+    if (!isNonPublicIp(ip)) return ip;
+    if (!privateFallback.includes(ip)) privateFallback.push(ip);
+  }
+
+  const remote = normalizeIp(req && req.socket && req.socket.remoteAddress);
+  if (remote && !isNonPublicIp(remote)) return remote;
+  if (remote && !privateFallback.includes(remote)) privateFallback.push(remote);
+
+  return privateFallback[0] || '';
 }
 
 function uuidFromHeader(header) {
