@@ -90,7 +90,7 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v8',
+      build: 'arvan-direct-realip-v9',
       directRelayImpl: 'native-websocket-grouped-v6',
       now: new Date().toISOString(),
     });
