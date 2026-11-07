@@ -144,7 +144,6 @@ func TestSourceIPRejectsSpoofedLeftmostXFF(t *testing.T) {
 	}
 }
 
-
 func TestSignedBridgeIPAccepted(t *testing.T) {
 	secret := "0123456789abcdef0123456789abcdef"
 	t.Setenv("REALIP_BRIDGE_SECRET", secret)
