@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const net = require('net');
 const tls = require('tls');
 const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
-const { createSessionGuard } = require('./session_guard');
+const { createSessionGuard, sourceIp } = require('./session_guard');
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_ECHO = 16 * 1024 * 1024;
@@ -46,6 +46,33 @@ function directOriginConfig() {
 function directOriginUrl(config) {
   const authority = config.port === 443 ? config.servername : config.servername + ':' + config.port;
   return 'wss://' + authority + config.path;
+}
+
+const PARSPACK_FRONT_PATH =
+  envValue('PARSPACK_FRONT_PATH', 'parspackfrontpath') || '/parspack-front-test';
+
+function parspackFrontConfig() {
+  const host = envValue('PARSPACK_FRONT_BACKEND_HOST', 'parspackfrontbackendhost');
+  const port = Number(envValue('PARSPACK_FRONT_BACKEND_PORT', 'parspackfrontbackendport') || 443);
+  const path = envValue('PARSPACK_FRONT_BACKEND_PATH', 'parspackfrontbackendpath');
+  const secret = envValue('REALIP_BRIDGE_SECRET', 'realipbridgesecret');
+  return { host, port, path, secret };
+}
+
+function parspackFrontUrl(config) {
+  const authority = config.port === 443 ? config.host : config.host + ':' + config.port;
+  return 'wss://' + authority + config.path;
+}
+
+function signedRealIpHeaders(ip, secret) {
+  const ts = Math.floor(Date.now() / 1000);
+  const message = ip + '|' + ts;
+  const proof = crypto.createHmac('sha256', secret).update(message).digest('hex');
+  return {
+    'x-slipnet-real-ip': ip,
+    'x-slipnet-real-ip-ts': String(ts),
+    'x-slipnet-real-ip-proof': proof,
+  };
 }
 
 function json(res, status, value) {
@@ -90,8 +117,20 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v9',
       directRelayImpl: 'native-websocket-grouped-v6',
+      parspackSignedRealIpFront: (() => {
+        const p = parspackFrontConfig();
+        return Boolean(
+          p.host &&
+          Number.isInteger(p.port) &&
+          p.port > 0 &&
+          p.port <= 65535 &&
+          p.path &&
+          p.secret.length >= 32
+        );
+      })(),
+      parspackFrontPath: PARSPACK_FRONT_PATH,
+      build: 'arvan-parspack-signed-realip-front-test-v1',
       now: new Date().toISOString(),
     });
   }
@@ -590,6 +629,67 @@ function handleDirectRelayWebSocket(req, socket, head) {
   socket.once('close', () => { if (!client) closeAll(); });
 }
 
+function handleParsPackSignedFrontWebSocket(req, socket, head) {
+  const p = parspackFrontConfig();
+  const ip = sourceIp(req, 'arvan');
+
+  if (
+    !ip ||
+    !p.host ||
+    !p.path ||
+    !Number.isInteger(p.port) ||
+    p.port < 1 ||
+    p.port > 65535 ||
+    p.secret.length < 32
+  ) {
+    return rejectUpgrade(socket);
+  }
+
+  let client = null;
+  let clientStream = null;
+  let backendStream = null;
+  let closed = false;
+
+  const backend = new WebSocket(parspackFrontUrl(p), {
+    perMessageDeflate: false,
+    handshakeTimeout: 15000,
+    headers: signedRealIpHeaders(ip, p.secret),
+  });
+
+  const closeAll = () => {
+    if (closed) return;
+    closed = true;
+    try { clientStream && clientStream.destroy(); } catch {}
+    try { backendStream && backendStream.destroy(); } catch {}
+    try { client && client.terminate(); } catch {}
+    try { backend.terminate(); } catch {}
+    try { if (!client) socket.destroy(); } catch {}
+  };
+
+  backend.once('open', () => {
+    acceptWebSocket(req, socket, head, (ws) => {
+      client = ws;
+      clientStream = createWebSocketStream(ws, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+      backendStream = createWebSocketStream(backend, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+      bridgeStreams(clientStream, backendStream, closeAll);
+    });
+  });
+
+  backend.once('error', () => {
+    if (!client) rejectUpgrade(socket, '502 Bad Gateway');
+    closeAll();
+  });
+  backend.once('close', closeAll);
+  socket.once('error', closeAll);
+  socket.once('close', () => { if (!client) closeAll(); });
+}
+
 server.on('upgrade', (req, socket, head) => {
   let url;
   try {
@@ -599,6 +699,7 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
+  if (url.pathname === PARSPACK_FRONT_PATH) return handleParsPackSignedFrontWebSocket(req, socket, head);
   if (url.pathname === RELAY_PATH) return handlePrimaryRelayWebSocket(req, socket, head);
   if (url.pathname === DIRECT_RELAY_PATH) return handleDirectRelayWebSocket(req, socket, head);
   return socket.destroy();
