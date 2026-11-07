@@ -121,47 +121,60 @@ func sourceIP(r *http.Request, route string) string {
 		return ""
 	}
 	h := r.Header
-	var ordered []string
+	var singles []string
 	if strings.EqualFold(strings.TrimSpace(route), "arvan") {
-		ordered = []string{
+		singles = []string{
 			h.Get("ar-real-ip"),
 			h.Get("x-client-ip"),
 			h.Get("x-real-ip"),
-			h.Get("x-forwarded-for"),
 		}
 	} else {
-		ordered = []string{
+		singles = []string{
 			h.Get("x-real-ip"),
-			h.Get("x-forwarded-for"),
 			h.Get("x-client-ip"),
 			h.Get("ar-real-ip"),
 		}
+	}
+
+	privateFallback := make([]string, 0, 8)
+	seen := map[string]bool{}
+	pushPrivate := func(ip string) {
+		if ip != "" && !seen[ip] {
+			seen[ip] = true
+			privateFallback = append(privateFallback, ip)
+		}
+	}
+
+	for _, raw := range singles {
+		for _, ip := range ipCandidates(raw) {
+			if !isNonPublicIP(ip) {
+				return ip
+			}
+			pushPrivate(ip)
+		}
+	}
+
+	forwarded := ipCandidates(h.Get("x-forwarded-for"))
+	for i := len(forwarded) - 1; i >= 0; i-- {
+		ip := forwarded[i]
+		if !isNonPublicIP(ip) {
+			return ip
+		}
+		pushPrivate(ip)
 	}
 
 	host := strings.TrimSpace(r.RemoteAddr)
 	if splitHost, _, err := net.SplitHostPort(host); err == nil {
 		host = splitHost
 	}
-	ordered = append(ordered, host)
-
-	candidates := make([]string, 0, 8)
-	seen := map[string]bool{}
-	for _, raw := range ordered {
-		for _, ip := range ipCandidates(raw) {
-			if !seen[ip] {
-				seen[ip] = true
-				candidates = append(candidates, ip)
-			}
-		}
+	remote := normalizeIP(host)
+	if remote != "" && !isNonPublicIP(remote) {
+		return remote
 	}
+	pushPrivate(remote)
 
-	for _, ip := range candidates {
-		if !isNonPublicIP(ip) {
-			return ip
-		}
-	}
-	if len(candidates) > 0 {
-		return candidates[0]
+	if len(privateFallback) > 0 {
+		return privateFallback[0]
 	}
 	return ""
 }

@@ -52,7 +52,7 @@ func TestSourceIPParsPackOrder(t *testing.T) {
 	}
 
 	r.Header.Del("X-Real-IP")
-	if got := sourceIP(r, "parspack"); got != "198.51.100.1" {
+	if got := sourceIP(r, "parspack"); got != "198.51.100.2" {
 		t.Fatalf("xff sourceIP=%q", got)
 	}
 }
@@ -129,5 +129,15 @@ func TestSourceIPArvanPrefersPublicXFFWhenARRealIPIsInternal(t *testing.T) {
 	r.Header.Set("X-Forwarded-For", "86.55.28.75, 192.168.4.104")
 	if got := sourceIP(r, "arvan"); got != "86.55.28.75" {
 		t.Fatalf("sourceIP=%q want public client IP", got)
+	}
+}
+
+func TestSourceIPRejectsSpoofedLeftmostXFF(t *testing.T) {
+	r, _ := http.NewRequest(http.MethodGet, "http://example.test/tunnel", nil)
+	r.RemoteAddr = "10.0.0.8:1234"
+	r.Header.Set("X-Real-IP", "192.168.4.104")
+	r.Header.Set("X-Forwarded-For", "8.8.8.8, 5.215.242.49, 192.168.4.104")
+	if got := sourceIP(r, "parspack"); got != "5.215.242.49" {
+		t.Fatalf("sourceIP=%q want rightmost public client IP", got)
 	}
 }

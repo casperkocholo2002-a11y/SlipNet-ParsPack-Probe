@@ -30,7 +30,7 @@ const (
 	maxEcho   = 16 * 1024 * 1024
 	maxStream = 8 * 1024 * 1024
 	maxWS     = 1024 * 1024
-	buildID   = "go-green-v3-realip-guard"
+	buildID   = "go-green-v4-realip-guard"
 )
 
 type app struct {
