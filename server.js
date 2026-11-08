@@ -13,7 +13,7 @@ const DIRECT_DIAG = {
   startedAt: new Date().toISOString(), upgrades: 0, accepted: 0, binaryFrames: 0, bytesIn: 0,
   authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0,
   pendingFlushes: 0, framesToBackend: 0, bytesToBackend: 0, backendMessages: 0, bytesFromBackend: 0,
-  framesToClient: 0, bytesToClient: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
+  framesToClient: 0, bytesToClient: 0, sendCallbacks: 0, sendErrors: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
   lastBackendCloseReason: null, lastError: null, lastEventAt: null,
 };
 function directDiagMark(field, value = 1) {
@@ -103,14 +103,14 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v11-frame-diag',
-      directRelayImpl: 'ws-edgecache-v8-frame-diag',
+      build: 'arvan-direct-realip-v12-ws-flush-await',
+      directRelayImpl: 'ws-edgecache-v9-flush-await',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v11-frame-diag', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v12-ws-flush-await', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-origin-check') {
@@ -479,8 +479,21 @@ function handleDirectRelayWebSocket(req, socket, head) {
         throw new Error('websocket_closed_during_send');
       }
       const chunk = buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK));
-      if (native) ws.send(chunk);
-      else ws.send(chunk, {binary: true, compress: false});
+      if (native) {
+        ws.send(chunk);
+      } else {
+        await new Promise((resolve, reject) => {
+          ws.send(chunk, {binary: true, compress: false}, (err) => {
+            if (err) {
+              directDiagMark('sendErrors');
+              reject(err);
+              return;
+            }
+            directDiagMark('sendCallbacks');
+            resolve();
+          });
+        });
+      }
       if (direction === 'backend') { directDiagMark('framesToBackend'); directDiagMark('bytesToBackend', chunk.length); }
       else { directDiagMark('framesToClient'); directDiagMark('bytesToClient', chunk.length); }
       if (ws.bufferedAmount > DIRECT_PENDING_MAX) {
