@@ -2,7 +2,7 @@ name: Publish relay container
 
 on:
   push:
-    branches: [emergency-arvan-concurrency-20261104, route3-us-worker-guard-order-test-20261108, route3-us-worker-ws-backend-test-20261108, route3-frame-diag-test-20261108, route3-ws-flush-await-test-20261108, route3-caas-worker-diag-test-20261108]
+    branches: [emergency-arvan-concurrency-20261104, route3-us-worker-guard-order-test-20261108, route3-us-worker-ws-backend-test-20261108, route3-frame-diag-test-20261108, route3-ws-flush-await-test-20261108, route3-caas-worker-diag-test-20261108, route3-ws-colo-diag-test-20261108]
     paths:
       - server.js
       - session_guard.js

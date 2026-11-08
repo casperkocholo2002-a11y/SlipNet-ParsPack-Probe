@@ -14,7 +14,7 @@ const DIRECT_DIAG = {
   authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0,
   pendingFlushes: 0, framesToBackend: 0, bytesToBackend: 0, backendMessages: 0, bytesFromBackend: 0,
   framesToClient: 0, bytesToClient: 0, sendCallbacks: 0, sendErrors: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
-  lastBackendCloseReason: null, lastError: null, lastEventAt: null,
+  lastBackendCloseReason: null, lastBackendCfRay: null, backendCfRayCounts: {}, lastError: null, lastEventAt: null,
 };
 function directDiagMark(field, value = 1) {
   if (typeof DIRECT_DIAG[field] === 'number') DIRECT_DIAG[field] += value;
@@ -103,14 +103,14 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v13-caas-worker-diag',
-      directRelayImpl: 'ws-edgecache-v9-flush-await-diag',
+      build: 'arvan-direct-realip-v14-ws-colo-diag',
+      directRelayImpl: 'ws-edgecache-v10-colo-diag',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v13-caas-worker-diag', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v14-ws-colo-diag', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
@@ -563,6 +563,17 @@ function handleDirectRelayWebSocket(req, socket, head) {
     backendOpenTimer = setTimeout(() => {
       if (!backendReady) closeAll('backend_open_timeout');
     }, 15000);
+
+    backend.once('upgrade', (response) => {
+      try {
+        const ray = String(response && response.headers && response.headers['cf-ray'] || '');
+        if (ray) {
+          directDiagSet('lastBackendCfRay', ray);
+          const colo = (ray.split('-').pop() || 'UNKNOWN').toUpperCase();
+          DIRECT_DIAG.backendCfRayCounts[colo] = Number(DIRECT_DIAG.backendCfRayCounts[colo] || 0) + 1;
+        }
+      } catch {}
+    });
 
     backend.once('open', () => {
       try { tuneSocket(backend._socket); } catch {}
