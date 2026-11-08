@@ -36,14 +36,6 @@ const DIRECT_SESSION_GUARD = createSessionGuard({
 });
 
 function directOriginConfig() {
-  if (DIRECT_GUARD_ROUTE === 'direct-r3') {
-    return {
-      host: 'slipnet-arvan-r3e-20261106000007-da1660.edgecache-628bbe41dc.workers.dev',
-      port: 443,
-      servername: 'slipnet-arvan-r3e-20261106000007-da1660.edgecache-628bbe41dc.workers.dev',
-      path: '/a/r3e/7bede6c87769ccdfd99e89547e7d4791391a14043433aeed',
-    };
-  }
   const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
   const port = Number(envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0);
   const servername = envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername');
@@ -98,7 +90,7 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v9',
+      build: 'arvan-direct-realip-v9-guard-before-backend-test',
       directRelayImpl: 'native-websocket-edgecache-v7',
       now: new Date().toISOString(),
     });
@@ -434,6 +426,8 @@ function handleDirectRelayWebSocket(req, socket, head) {
   const DIRECT_PENDING_MAX = 2 * 1024 * 1024;
 
   let client = null;
+  let backend = null;
+  let backendOpenTimer = null;
   let closed = false;
   let backendReady = false;
   let authorized = false;
@@ -449,20 +443,14 @@ function handleDirectRelayWebSocket(req, socket, head) {
     return rejectUpgrade(socket);
   }
 
-  const backend = new NativeWebSocket(directOriginUrl(d));
-  backend.binaryType = 'arraybuffer';
-  const backendOpenTimer = setTimeout(() => {
-    if (!backendReady) closeAll();
-  }, 15000);
-
   const closeAll = () => {
     if (closed) return;
     closed = true;
     pending = [];
     pendingBytes = 0;
-    clearTimeout(backendOpenTimer);
+    if (backendOpenTimer) clearTimeout(backendOpenTimer);
     try { client && client.terminate(); } catch {}
-    try { backend.close(); } catch {}
+    try { backend && backend.close(); } catch {}
     try { if (!client) socket.destroy(); } catch {}
   };
 
@@ -514,6 +502,37 @@ function handleDirectRelayWebSocket(req, socket, head) {
     }
   };
 
+  const startBackend = () => {
+    if (!authorized || backend || closed) return;
+
+    backend = new NativeWebSocket(directOriginUrl(d));
+    backend.binaryType = 'arraybuffer';
+    backendOpenTimer = setTimeout(() => {
+      if (!backendReady) closeAll();
+    }, 15000);
+
+    backend.addEventListener('open', () => {
+      if (backendOpenTimer) clearTimeout(backendOpenTimer);
+      backendOpenTimer = null;
+      backendReady = true;
+      flushPending();
+    }, {once: true});
+
+    backend.addEventListener('message', (event) => {
+      if (closed || !client || typeof event.data === 'string') {
+        closeAll();
+        return;
+      }
+      const frame = Buffer.from(event.data);
+      backendToClient = backendToClient
+        .then(() => sendChunked(client, frame, false))
+        .catch(closeAll);
+    });
+
+    backend.addEventListener('close', closeAll, {once: true});
+    backend.addEventListener('error', closeAll, {once: true});
+  };
+
   const startAuthorization = () => {
     if (authStarted || header.length < 17 || !client || closed) return;
     authStarted = true;
@@ -524,7 +543,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
           return;
         }
         authorized = true;
-        flushPending();
+        startBackend();
       })
       .catch(closeAll);
   };
@@ -540,7 +559,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
 
       const frame = Buffer.from(data);
 
-      if (!authorized) {
+      if (!authorized || !backendReady) {
         pendingBytes += frame.length;
         if (pendingBytes > DIRECT_PENDING_MAX) {
           closeAll();
@@ -556,16 +575,6 @@ function handleDirectRelayWebSocket(req, socket, head) {
         return;
       }
 
-      if (!backendReady) {
-        pendingBytes += frame.length;
-        if (pendingBytes > DIRECT_PENDING_MAX) {
-          closeAll();
-          return;
-        }
-        pending.push(frame);
-        return;
-      }
-
       clientToBackend = clientToBackend
         .then(() => sendChunked(backend, frame, true))
         .catch(closeAll);
@@ -575,25 +584,6 @@ function handleDirectRelayWebSocket(req, socket, head) {
     ws.once('error', closeAll);
   });
 
-  backend.addEventListener('open', () => {
-    clearTimeout(backendOpenTimer);
-    backendReady = true;
-    flushPending();
-  }, {once: true});
-
-  backend.addEventListener('message', (event) => {
-    if (closed || !client || typeof event.data === 'string') {
-      closeAll();
-      return;
-    }
-    const frame = Buffer.from(event.data);
-    backendToClient = backendToClient
-      .then(() => sendChunked(client, frame, false))
-      .catch(closeAll);
-  });
-
-  backend.addEventListener('close', closeAll, {once: true});
-  backend.addEventListener('error', closeAll, {once: true});
   socket.once('error', closeAll);
   socket.once('close', () => { if (!client) closeAll(); });
 }
