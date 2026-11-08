@@ -103,14 +103,31 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v12-ws-flush-await',
-      directRelayImpl: 'ws-edgecache-v9-flush-await',
+      build: 'arvan-direct-realip-v13-caas-worker-diag',
+      directRelayImpl: 'ws-edgecache-v9-flush-await-diag',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v12-ws-flush-await', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v13-caas-worker-diag', diag: DIRECT_DIAG });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
+    const d = directOriginConfig();
+    if (!d.servername) return json(res, 503, { ok: false, error: 'direct_origin_not_configured' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    fetch('https://' + d.servername + '/diag-proxy', { signal: controller.signal, headers: { 'cache-control': 'no-cache' } })
+      .then(async (r) => {
+        const text = await r.text();
+        let body = text;
+        try { body = JSON.parse(text); } catch {}
+        json(res, 200, { ok: r.ok, status: r.status, cfRay: r.headers.get('cf-ray'), server: r.headers.get('server'), body });
+      })
+      .catch((err) => json(res, 502, { ok: false, error: String(err && err.message || err) }))
+      .finally(() => clearTimeout(timer));
+    return;
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-origin-check') {
