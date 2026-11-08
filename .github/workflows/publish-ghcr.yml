@@ -2,7 +2,7 @@ name: Publish relay container
 
 on:
   push:
-    branches: [emergency-arvan-concurrency-20261104]
+    branches: [emergency-arvan-concurrency-20261104, route3-us-worker-guard-order-test-20261108]
     paths:
       - server.js
       - session_guard.js
@@ -32,6 +32,6 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:emergency-arvan-${{ github.sha }}
+            ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:route3-us-test-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/casperkocholo2002-a11y/SlipNet-ParsPack-Probe
