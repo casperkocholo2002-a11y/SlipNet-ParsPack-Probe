@@ -8,6 +8,19 @@ const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
 const { createSessionGuard } = require('./session_guard');
 
 const PORT = Number(process.env.PORT || 3000);
+const DIRECT_DIAG_PATH = '/__r3diag_7f2b9d4c';
+const DIRECT_DIAG = {
+  startedAt: new Date().toISOString(), upgrades: 0, accepted: 0, binaryFrames: 0, bytesIn: 0,
+  authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0,
+  pendingFlushes: 0, framesToBackend: 0, bytesToBackend: 0, backendMessages: 0, bytesFromBackend: 0,
+  framesToClient: 0, bytesToClient: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
+  lastBackendCloseReason: null, lastError: null, lastEventAt: null,
+};
+function directDiagMark(field, value = 1) {
+  if (typeof DIRECT_DIAG[field] === 'number') DIRECT_DIAG[field] += value;
+  DIRECT_DIAG.lastEventAt = new Date().toISOString();
+}
+function directDiagSet(field, value) { DIRECT_DIAG[field] = value; DIRECT_DIAG.lastEventAt = new Date().toISOString(); }
 const MAX_ECHO = 16 * 1024 * 1024;
 const MAX_STREAM = 8 * 1024 * 1024;
 const MAX_WS = 1024 * 1024;
@@ -90,10 +103,14 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v10-ws-backend-test',
-      directRelayImpl: 'ws-edgecache-v8',
+      build: 'arvan-direct-realip-v11-frame-diag',
+      directRelayImpl: 'ws-edgecache-v8-frame-diag',
       now: new Date().toISOString(),
     });
+  }
+
+  if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v11-frame-diag', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-origin-check') {
@@ -416,6 +433,7 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
 }
 
 function handleDirectRelayWebSocket(req, socket, head) {
+  directDiagMark('upgrades');
   const d = directOriginConfig();
 
   if (!d.host || !d.servername || !d.path || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535) {
@@ -438,9 +456,11 @@ function handleDirectRelayWebSocket(req, socket, head) {
   let clientToBackend = Promise.resolve();
   let backendToClient = Promise.resolve();
 
-  const closeAll = () => {
+  const closeAll = (reason = 'unknown') => {
     if (closed) return;
     closed = true;
+    directDiagMark('closes');
+    directDiagSet('lastCloseReason', String(reason && reason.message ? reason.message : reason));
     pending = [];
     pendingBytes = 0;
     if (backendOpenTimer) clearTimeout(backendOpenTimer);
@@ -449,7 +469,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
     try { if (!client) socket.destroy(); } catch {}
   };
 
-  const sendChunked = async (ws, data, native = false) => {
+  const sendChunked = async (ws, data, native = false, direction = 'backend') => {
     if (!ws || ws.readyState !== 1) {
       throw new Error('websocket_not_open');
     }
@@ -461,6 +481,8 @@ function handleDirectRelayWebSocket(req, socket, head) {
       const chunk = buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK));
       if (native) ws.send(chunk);
       else ws.send(chunk, {binary: true, compress: false});
+      if (direction === 'backend') { directDiagMark('framesToBackend'); directDiagMark('bytesToBackend', chunk.length); }
+      else { directDiagMark('framesToClient'); directDiagMark('bytesToClient', chunk.length); }
       if (ws.bufferedAmount > DIRECT_PENDING_MAX) {
         await new Promise((resolve, reject) => {
           const started = Date.now();
@@ -487,18 +509,20 @@ function handleDirectRelayWebSocket(req, socket, head) {
 
   const flushPending = () => {
     if (!authorized || !backendReady || closed || !pending.length) return;
+    directDiagMark('pendingFlushes');
     const frames = pending;
     pending = [];
     pendingBytes = 0;
     for (const frame of frames) {
       clientToBackend = clientToBackend
-        .then(() => sendChunked(backend, frame, false))
-        .catch(closeAll);
+        .then(() => sendChunked(backend, frame, false, 'backend'))
+        .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_send_error'); });
     }
   };
 
   const startBackend = () => {
     if (!authorized || backend || closed) return;
+    directDiagMark('backendStart');
 
     backend = new WebSocket(directOriginUrl(d), {
       perMessageDeflate: false,
@@ -507,7 +531,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
     });
     backend.binaryType = 'arraybuffer';
     backendOpenTimer = setTimeout(() => {
-      if (!backendReady) closeAll();
+      if (!backendReady) closeAll('backend_open_timeout');
     }, 15000);
 
     backend.once('open', () => {
@@ -515,41 +539,52 @@ function handleDirectRelayWebSocket(req, socket, head) {
       if (backendOpenTimer) clearTimeout(backendOpenTimer);
       backendOpenTimer = null;
       backendReady = true;
+      directDiagMark('backendOpen');
       flushPending();
     });
 
     backend.on('message', (data, isBinary) => {
+      directDiagMark('backendMessages');
+      directDiagMark('bytesFromBackend', Buffer.byteLength(data));
       if (closed || !client || !isBinary) {
-        closeAll();
+        closeAll('backend_nonbinary_or_no_client');
         return;
       }
       const frame = Buffer.from(data);
       backendToClient = backendToClient
-        .then(() => sendChunked(client, frame, false))
-        .catch(closeAll);
+        .then(() => sendChunked(client, frame, false, 'client'))
+        .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('client_send_error'); });
     });
 
-    backend.once('close', closeAll);
-    backend.once('error', closeAll);
+    backend.once('close', (code, reason) => {
+      directDiagSet('lastBackendCloseCode', Number(code));
+      directDiagSet('lastBackendCloseReason', Buffer.from(reason || '').toString().slice(0, 120));
+      closeAll('backend_close_' + code);
+    });
+    backend.once('error', (err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_error'); });
   };
 
   const startAuthorization = () => {
     if (authStarted || header.length < 17 || !client || closed) return;
     authStarted = true;
+    directDiagMark('authStarted');
     DIRECT_SESSION_GUARD.authorizeHeader(header.subarray(0, 17), client, req)
       .then((decision) => {
         if (!decision || !decision.ok || closed) {
-          closeAll();
+          directDiagMark('authFail');
+          closeAll('auth_denied');
           return;
         }
         authorized = true;
+        directDiagMark('authOk');
         startBackend();
       })
-      .catch(closeAll);
+      .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('auth_error'); });
   };
 
   acceptWebSocket(req, socket, head, (ws) => {
     client = ws;
+    directDiagMark('accepted');
 
     ws.on('message', (data, isBinary) => {
       if (closed || !isBinary) {
@@ -558,6 +593,8 @@ function handleDirectRelayWebSocket(req, socket, head) {
       }
 
       const frame = Buffer.from(data);
+      directDiagMark('binaryFrames');
+      directDiagMark('bytesIn', frame.length);
 
       if (!authorized || !backendReady) {
         pendingBytes += frame.length;
@@ -576,12 +613,12 @@ function handleDirectRelayWebSocket(req, socket, head) {
       }
 
       clientToBackend = clientToBackend
-        .then(() => sendChunked(backend, frame, false))
-        .catch(closeAll);
+        .then(() => sendChunked(backend, frame, false, 'backend'))
+        .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_send_error'); });
     });
 
-    ws.once('close', closeAll);
-    ws.once('error', closeAll);
+    ws.once('close', (code) => closeAll('client_close_' + code));
+    ws.once('error', (err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('client_error'); });
   });
 
   socket.once('error', closeAll);
