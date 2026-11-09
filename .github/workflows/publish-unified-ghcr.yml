@@ -1,0 +1,35 @@
+name: Publish unified Arvan multiroute container
+
+on:
+  push:
+    branches: [unified-arvan-multiroute-20261109]
+    paths:
+      - server.js
+      - session_guard.js
+      - package.json
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/publish-unified-ghcr.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:unified-arvan-${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/casperkocholo2002-a11y/SlipNet-ParsPack-Probe
