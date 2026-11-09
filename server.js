@@ -8,6 +8,19 @@ const { WebSocket, WebSocketServer, createWebSocketStream } = require('ws');
 const { createSessionGuard } = require('./session_guard');
 
 const PORT = Number(process.env.PORT || 3000);
+const DIRECT_DIAG_PATH = '/__r3diag_7f2b9d4c';
+const DIRECT_DIAG = {
+  startedAt: new Date().toISOString(), upgrades: 0, accepted: 0, binaryFrames: 0, bytesIn: 0,
+  authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0,
+  pendingFlushes: 0, framesToBackend: 0, bytesToBackend: 0, backendMessages: 0, bytesFromBackend: 0,
+  framesToClient: 0, bytesToClient: 0, sendCallbacks: 0, sendErrors: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
+  lastBackendCloseReason: null, lastBackendCfRay: null, backendCfRayCounts: {}, lastError: null, lastEventAt: null,
+};
+function directDiagMark(field, value = 1) {
+  if (typeof DIRECT_DIAG[field] === 'number') DIRECT_DIAG[field] += value;
+  DIRECT_DIAG.lastEventAt = new Date().toISOString();
+}
+function directDiagSet(field, value) { DIRECT_DIAG[field] = value; DIRECT_DIAG.lastEventAt = new Date().toISOString(); }
 const MAX_ECHO = 16 * 1024 * 1024;
 const MAX_STREAM = 8 * 1024 * 1024;
 const MAX_WS = 1024 * 1024;
@@ -25,15 +38,33 @@ const V2_SESSION_GUARD = createSessionGuard({
   requestTimeoutMs: 1800,
 });
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
+const DIRECT_ROUTE_PREFIX = DIRECT_RELAY_PATH.replace(/\/+$/, '') + '/';
 const DIRECT_GUARD_ROUTE = envValue('DIRECT_GUARD_ROUTE', 'directguardroute') || 'direct-r1';
+const DIRECT_TELEMETRY_URL =
+  envValue('DIRECT_SESSION_TELEMETRY_URL', 'directsessiontelemetryurl') ||
+  'https://monitor.reoos.ir/api/direct-session/telemetry';
 const DIRECT_SESSION_GUARD = createSessionGuard({
   route: DIRECT_GUARD_ROUTE,
-  telemetryUrl:
-    envValue('DIRECT_SESSION_TELEMETRY_URL', 'directsessiontelemetryurl') ||
-    'https://monitor.reoos.ir/api/direct-session/telemetry',
+  telemetryUrl: DIRECT_TELEMETRY_URL,
   heartbeatMs: 5000,
   requestTimeoutMs: 1800,
 });
+const DIRECT_ROUTE_GUARDS = new Map();
+
+function directRouteGuard(route) {
+  if (!route || route === DIRECT_GUARD_ROUTE) return DIRECT_SESSION_GUARD;
+  let guard = DIRECT_ROUTE_GUARDS.get(route);
+  if (!guard) {
+    guard = createSessionGuard({
+      route,
+      telemetryUrl: DIRECT_TELEMETRY_URL,
+      heartbeatMs: 5000,
+      requestTimeoutMs: 1800,
+    });
+    DIRECT_ROUTE_GUARDS.set(route, guard);
+  }
+  return guard;
+}
 
 function directOriginConfig() {
   const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
@@ -46,6 +77,45 @@ function directOriginConfig() {
 function directOriginUrl(config) {
   const authority = config.port === 443 ? config.servername : config.servername + ':' + config.port;
   return 'wss://' + authority + config.path;
+}
+
+function directRouteCodeFromPath(pathname) {
+  if (!pathname.startsWith(DIRECT_ROUTE_PREFIX)) return null;
+  const code = pathname.slice(DIRECT_ROUTE_PREFIX.length).trim().toUpperCase();
+  if (!/^[A-Z0-9_-]{2,16}$/.test(code)) return null;
+  return code;
+}
+
+function directRouteConfig(code) {
+  if (!code) {
+    return {
+      code: 'LEGACY',
+      publicPath: DIRECT_RELAY_PATH,
+      guard: DIRECT_SESSION_GUARD,
+      origin: directOriginConfig(),
+    };
+  }
+  const prefix = 'DIRECT_ROUTE_' + code + '_';
+  const host = envValue(prefix + 'HOST', (prefix + 'HOST').toLowerCase());
+  const port = Number(envValue(prefix + 'PORT', (prefix + 'PORT').toLowerCase()) || 443);
+  const servername = envValue(prefix + 'SERVERNAME', (prefix + 'SERVERNAME').toLowerCase()) || host;
+  const path = envValue(prefix + 'PATH', (prefix + 'PATH').toLowerCase());
+  const guardRoute = envValue(prefix + 'GUARD_ROUTE', (prefix + 'GUARD_ROUTE').toLowerCase()) || ('direct-' + code.toLowerCase());
+  return {
+    code,
+    publicPath: DIRECT_ROUTE_PREFIX + code.toLowerCase(),
+    guard: directRouteGuard(guardRoute),
+    origin: { host, port, servername, path },
+  };
+}
+
+function configuredDirectRouteCodes() {
+  const codes = new Set();
+  for (const key of Object.keys(process.env)) {
+    const m = /^DIRECT_ROUTE_([A-Z0-9_-]{2,16})_HOST$/.exec(key);
+    if (m && process.env[key]) codes.add(m[1]);
+  }
+  return Array.from(codes).sort();
 }
 
 function json(res, status, value) {
@@ -88,16 +158,41 @@ const server = http.createServer((req, res) => {
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
       directGuardRoute: DIRECT_SESSION_GUARD.route,
+      directRoutesConfigured: configuredDirectRouteCodes(),
+      directRouteMode: 'path-dispatch',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v10-ws-backend-test',
-      directRelayImpl: 'ws-edgecache-v8',
+      build: 'arvan-direct-realip-v15-unified-multiroute',
+      directRelayImpl: 'ws-edgecache-v11-path-dispatch',
       now: new Date().toISOString(),
     });
   }
 
-  if (req.method === 'GET' && url.pathname === '/direct-origin-check') {
+  if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v15-unified-multiroute', diag: DIRECT_DIAG });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
     const d = directOriginConfig();
+    if (!d.servername) return json(res, 503, { ok: false, error: 'direct_origin_not_configured' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    fetch('https://' + d.servername + '/diag-proxy', { signal: controller.signal, headers: { 'cache-control': 'no-cache' } })
+      .then(async (r) => {
+        const text = await r.text();
+        let body = text;
+        try { body = JSON.parse(text); } catch {}
+        json(res, 200, { ok: r.ok, status: r.status, cfRay: r.headers.get('cf-ray'), server: r.headers.get('server'), body });
+      })
+      .catch((err) => json(res, 502, { ok: false, error: String(err && err.message || err) }))
+      .finally(() => clearTimeout(timer));
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/direct-origin-check') {
+    const requestedCode = String(url.searchParams.get('route') || '').trim().toUpperCase();
+    const selected = requestedCode ? directRouteConfig(requestedCode) : directRouteConfig(null);
+    const d = selected.origin;
     if (!d.host || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535 || !d.servername || !d.path) {
       return json(res, 503, { ok: false, error: 'direct_origin_check_not_configured' });
     }
@@ -120,7 +215,7 @@ const server = http.createServer((req, res) => {
       backend = new WebSocket(directOriginUrl(d));
       backend.binaryType = 'arraybuffer';
       backend.addEventListener('open', () => {
-        finish(200, { ok: true, connected: true, mode: 'wss', ms: Date.now() - started });
+        finish(200, { ok: true, connected: true, mode: 'wss', route: selected.code, ms: Date.now() - started });
       }, { once: true });
       backend.addEventListener('error', () => {
         finish(502, { ok: false, connected: false, error: 'wss_connect_error', ms: Date.now() - started });
@@ -415,8 +510,11 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
   socket.once('close', () => { if (!client) closeAll(); });
 }
 
-function handleDirectRelayWebSocket(req, socket, head) {
-  const d = directOriginConfig();
+function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
+  directDiagMark('upgrades');
+  const selected = selectedRoute || directRouteConfig(null);
+  const d = selected.origin;
+  const sessionGuard = selected.guard;
 
   if (!d.host || !d.servername || !d.path || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535) {
     return rejectUpgrade(socket);
@@ -438,9 +536,11 @@ function handleDirectRelayWebSocket(req, socket, head) {
   let clientToBackend = Promise.resolve();
   let backendToClient = Promise.resolve();
 
-  const closeAll = () => {
+  const closeAll = (reason = 'unknown') => {
     if (closed) return;
     closed = true;
+    directDiagMark('closes');
+    directDiagSet('lastCloseReason', String(reason && reason.message ? reason.message : reason));
     pending = [];
     pendingBytes = 0;
     if (backendOpenTimer) clearTimeout(backendOpenTimer);
@@ -449,7 +549,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
     try { if (!client) socket.destroy(); } catch {}
   };
 
-  const sendChunked = async (ws, data, native = false) => {
+  const sendChunked = async (ws, data, native = false, direction = 'backend') => {
     if (!ws || ws.readyState !== 1) {
       throw new Error('websocket_not_open');
     }
@@ -459,8 +559,23 @@ function handleDirectRelayWebSocket(req, socket, head) {
         throw new Error('websocket_closed_during_send');
       }
       const chunk = buf.subarray(offset, Math.min(buf.length, offset + DIRECT_FRAME_CHUNK));
-      if (native) ws.send(chunk);
-      else ws.send(chunk, {binary: true, compress: false});
+      if (native) {
+        ws.send(chunk);
+      } else {
+        await new Promise((resolve, reject) => {
+          ws.send(chunk, {binary: true, compress: false}, (err) => {
+            if (err) {
+              directDiagMark('sendErrors');
+              reject(err);
+              return;
+            }
+            directDiagMark('sendCallbacks');
+            resolve();
+          });
+        });
+      }
+      if (direction === 'backend') { directDiagMark('framesToBackend'); directDiagMark('bytesToBackend', chunk.length); }
+      else { directDiagMark('framesToClient'); directDiagMark('bytesToClient', chunk.length); }
       if (ws.bufferedAmount > DIRECT_PENDING_MAX) {
         await new Promise((resolve, reject) => {
           const started = Date.now();
@@ -487,18 +602,20 @@ function handleDirectRelayWebSocket(req, socket, head) {
 
   const flushPending = () => {
     if (!authorized || !backendReady || closed || !pending.length) return;
+    directDiagMark('pendingFlushes');
     const frames = pending;
     pending = [];
     pendingBytes = 0;
     for (const frame of frames) {
       clientToBackend = clientToBackend
-        .then(() => sendChunked(backend, frame, false))
-        .catch(closeAll);
+        .then(() => sendChunked(backend, frame, false, 'backend'))
+        .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_send_error'); });
     }
   };
 
   const startBackend = () => {
     if (!authorized || backend || closed) return;
+    directDiagMark('backendStart');
 
     backend = new WebSocket(directOriginUrl(d), {
       perMessageDeflate: false,
@@ -507,49 +624,71 @@ function handleDirectRelayWebSocket(req, socket, head) {
     });
     backend.binaryType = 'arraybuffer';
     backendOpenTimer = setTimeout(() => {
-      if (!backendReady) closeAll();
+      if (!backendReady) closeAll('backend_open_timeout');
     }, 15000);
+
+    backend.once('upgrade', (response) => {
+      try {
+        const ray = String(response && response.headers && response.headers['cf-ray'] || '');
+        if (ray) {
+          directDiagSet('lastBackendCfRay', ray);
+          const colo = (ray.split('-').pop() || 'UNKNOWN').toUpperCase();
+          DIRECT_DIAG.backendCfRayCounts[colo] = Number(DIRECT_DIAG.backendCfRayCounts[colo] || 0) + 1;
+        }
+      } catch {}
+    });
 
     backend.once('open', () => {
       try { tuneSocket(backend._socket); } catch {}
       if (backendOpenTimer) clearTimeout(backendOpenTimer);
       backendOpenTimer = null;
       backendReady = true;
+      directDiagMark('backendOpen');
       flushPending();
     });
 
     backend.on('message', (data, isBinary) => {
+      directDiagMark('backendMessages');
+      directDiagMark('bytesFromBackend', Buffer.byteLength(data));
       if (closed || !client || !isBinary) {
-        closeAll();
+        closeAll('backend_nonbinary_or_no_client');
         return;
       }
       const frame = Buffer.from(data);
       backendToClient = backendToClient
-        .then(() => sendChunked(client, frame, false))
-        .catch(closeAll);
+        .then(() => sendChunked(client, frame, false, 'client'))
+        .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('client_send_error'); });
     });
 
-    backend.once('close', closeAll);
-    backend.once('error', closeAll);
+    backend.once('close', (code, reason) => {
+      directDiagSet('lastBackendCloseCode', Number(code));
+      directDiagSet('lastBackendCloseReason', Buffer.from(reason || '').toString().slice(0, 120));
+      closeAll('backend_close_' + code);
+    });
+    backend.once('error', (err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_error'); });
   };
 
   const startAuthorization = () => {
     if (authStarted || header.length < 17 || !client || closed) return;
     authStarted = true;
-    DIRECT_SESSION_GUARD.authorizeHeader(header.subarray(0, 17), client, req)
+    directDiagMark('authStarted');
+    sessionGuard.authorizeHeader(header.subarray(0, 17), client, req)
       .then((decision) => {
         if (!decision || !decision.ok || closed) {
-          closeAll();
+          directDiagMark('authFail');
+          closeAll('auth_denied');
           return;
         }
         authorized = true;
+        directDiagMark('authOk');
         startBackend();
       })
-      .catch(closeAll);
+      .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('auth_error'); });
   };
 
   acceptWebSocket(req, socket, head, (ws) => {
     client = ws;
+    directDiagMark('accepted');
 
     ws.on('message', (data, isBinary) => {
       if (closed || !isBinary) {
@@ -558,6 +697,8 @@ function handleDirectRelayWebSocket(req, socket, head) {
       }
 
       const frame = Buffer.from(data);
+      directDiagMark('binaryFrames');
+      directDiagMark('bytesIn', frame.length);
 
       if (!authorized || !backendReady) {
         pendingBytes += frame.length;
@@ -576,12 +717,12 @@ function handleDirectRelayWebSocket(req, socket, head) {
       }
 
       clientToBackend = clientToBackend
-        .then(() => sendChunked(backend, frame, false))
-        .catch(closeAll);
+        .then(() => sendChunked(backend, frame, false, 'backend'))
+        .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_send_error'); });
     });
 
-    ws.once('close', closeAll);
-    ws.once('error', closeAll);
+    ws.once('close', (code) => closeAll('client_close_' + code));
+    ws.once('error', (err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('client_error'); });
   });
 
   socket.once('error', closeAll);
@@ -598,7 +739,15 @@ server.on('upgrade', (req, socket, head) => {
 
   if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
   if (url.pathname === RELAY_PATH) return handlePrimaryRelayWebSocket(req, socket, head);
-  if (url.pathname === DIRECT_RELAY_PATH) return handleDirectRelayWebSocket(req, socket, head);
+  if (url.pathname === DIRECT_RELAY_PATH) return handleDirectRelayWebSocket(req, socket, head, directRouteConfig(null));
+  const routeCode = directRouteCodeFromPath(url.pathname);
+  if (routeCode) {
+    const selected = directRouteConfig(routeCode);
+    const d = selected.origin;
+    if (d.host && d.servername && d.path && Number.isInteger(d.port) && d.port > 0 && d.port <= 65535) {
+      return handleDirectRelayWebSocket(req, socket, head, selected);
+    }
+  }
   return socket.destroy();
 });
 
