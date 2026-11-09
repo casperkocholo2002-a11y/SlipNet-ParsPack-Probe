@@ -119,6 +119,7 @@ function directRouteCodeFromPath(pathname) {
 }
 
 const DIRECT_MULTIROUTE_PRIMARY_HOST = envValue('DIRECT_MULTIROUTE_PRIMARY_HOST', 'directmultirouteprimaryhost') || 'cfws-test-1108.reoos.ir';
+const DIRECT_BUILTIN_ROUTE_PATHS = Object.freeze({ TUS: '/tor/us', TJP: '/tor/jp' });
 
 function directRouteConfig(code) {
   if (!code) {
@@ -134,7 +135,7 @@ function directRouteConfig(code) {
   const host = DIRECT_MULTIROUTE_PRIMARY_HOST || configuredHost;
   const port = Number(envValue(prefix + 'PORT', (prefix + 'PORT').toLowerCase()) || 443);
   const servername = host;
-  const path = envValue(prefix + 'PATH', (prefix + 'PATH').toLowerCase());
+  const path = envValue(prefix + 'PATH', (prefix + 'PATH').toLowerCase()) || DIRECT_BUILTIN_ROUTE_PATHS[code] || '';
   const guardRoute = envValue(prefix + 'GUARD_ROUTE', (prefix + 'GUARD_ROUTE').toLowerCase()) || ('direct-' + code.toLowerCase());
   return {
     code,
@@ -145,7 +146,7 @@ function directRouteConfig(code) {
 }
 
 function configuredDirectRouteCodes() {
-  const codes = new Set();
+  const codes = new Set(Object.keys(DIRECT_BUILTIN_ROUTE_PATHS));
   for (const key of Object.keys(process.env)) {
     const m = /^DIRECT_ROUTE_([A-Z0-9_-]{2,16})_HOST$/.exec(key);
     if (m && process.env[key]) codes.add(m[1]);
@@ -198,14 +199,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: 0,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v23-arvan-proxied-origin',
-      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-proxied-origin',
+      build: 'arvan-direct-realip-v24-tor-canary',
+      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-tor-canary',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v23-arvan-proxied-origin', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v24-tor-canary', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
