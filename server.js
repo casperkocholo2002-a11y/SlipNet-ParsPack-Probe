@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DIRECT_DIAG_PATH = '/__r3diag_7f2b9d4c';
 const DIRECT_DIAG = {
   startedAt: new Date().toISOString(), upgrades: 0, accepted: 0, binaryFrames: 0, bytesIn: 0,
-  authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0, backendRetry: 0, backendExhausted: 0,
+  authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0, backendRetry: 0, backendFallbackSwitch: 0, backendExhausted: 0,
   pendingFlushes: 0, framesToBackend: 0, bytesToBackend: 0, backendMessages: 0, bytesFromBackend: 0,
   framesToClient: 0, bytesToClient: 0, sendCallbacks: 0, sendErrors: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
   lastBackendCloseReason: null, lastBackendCfRay: null, backendCfRayCounts: {}, lastError: null, lastEventAt: null,
@@ -77,6 +77,32 @@ function directOriginConfig() {
 function directOriginUrl(config) {
   const authority = config.port === 443 ? config.servername : config.servername + ':' + config.port;
   return 'wss://' + authority + config.path;
+}
+
+function directBackendFallbackHosts() {
+  const raw = envValue('DIRECT_BACKEND_FALLBACK_HOSTS', 'directbackendfallbackhosts');
+  if (!raw) return [];
+  const out = [];
+  for (const part of raw.split(',')) {
+    const host = String(part || '').trim();
+    if (!host || out.includes(host)) continue;
+    out.push(host);
+  }
+  return out;
+}
+
+function directOriginCandidates(config) {
+  const out = [config];
+  for (const host of directBackendFallbackHosts()) {
+    if (!host || host === config.host) continue;
+    out.push({
+      host,
+      port: config.port,
+      servername: host,
+      path: config.path,
+    });
+  }
+  return out;
 }
 
 function directRouteCodeFromPath(pathname) {
@@ -160,16 +186,17 @@ const server = http.createServer((req, res) => {
       directGuardRoute: DIRECT_SESSION_GUARD.route,
       directRoutesConfigured: configuredDirectRouteCodes(),
       directRouteMode: 'path-dispatch',
+      directBackendFallbackCount: directBackendFallbackHosts().length,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v16-unified-retry',
-      directRelayImpl: 'ws-edgecache-v12-backend-retry',
+      build: 'arvan-direct-realip-v17-worker-failover',
+      directRelayImpl: 'ws-edgecache-v13-worker-failover',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v16-unified-retry', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v17-worker-failover', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
@@ -522,9 +549,10 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
 
   const DIRECT_FRAME_CHUNK = 32 * 1024;
   const DIRECT_PENDING_MAX = 2 * 1024 * 1024;
-  const DIRECT_BACKEND_MAX_ATTEMPTS = 3;
+  const backendCandidates = directOriginCandidates(d);
+  const DIRECT_BACKEND_MAX_ATTEMPTS = Math.max(3, backendCandidates.length);
   const DIRECT_BACKEND_OPEN_TIMEOUT_MS = 5000;
-  const DIRECT_BACKEND_RETRY_DELAYS_MS = [120, 350];
+  const DIRECT_BACKEND_RETRY_DELAYS_MS = [120, 350, 650, 900];
 
   let client = null;
   let backend = null;
@@ -624,7 +652,11 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
     backendAttempt += 1;
     directDiagMark('backendStart');
 
-    const candidate = new WebSocket(directOriginUrl(d), {
+    const candidateConfig = backendCandidates[(backendAttempt - 1) % backendCandidates.length];
+    if (backendAttempt > 1 && candidateConfig.host !== d.host) {
+      directDiagMark('backendFallbackSwitch');
+    }
+    const candidate = new WebSocket(directOriginUrl(candidateConfig), {
       perMessageDeflate: false,
       handshakeTimeout: DIRECT_BACKEND_OPEN_TIMEOUT_MS,
       maxPayload: MAX_WS,
@@ -680,6 +712,7 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
       if (backendOpenTimer) clearTimeout(backendOpenTimer);
       backendOpenTimer = null;
       backendReady = true;
+      directDiagSet('lastBackendHost', candidateConfig.host);
       directDiagMark('backendOpen');
       flushPending();
     });
