@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DIRECT_DIAG_PATH = '/__r3diag_7f2b9d4c';
 const DIRECT_DIAG = {
   startedAt: new Date().toISOString(), upgrades: 0, accepted: 0, binaryFrames: 0, bytesIn: 0,
-  authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0,
+  authStarted: 0, authOk: 0, authFail: 0, backendStart: 0, backendOpen: 0, backendRetry: 0, backendExhausted: 0,
   pendingFlushes: 0, framesToBackend: 0, bytesToBackend: 0, backendMessages: 0, bytesFromBackend: 0,
   framesToClient: 0, bytesToClient: 0, sendCallbacks: 0, sendErrors: 0, closes: 0, lastCloseReason: null, lastBackendCloseCode: null,
   lastBackendCloseReason: null, lastBackendCfRay: null, backendCfRayCounts: {}, lastError: null, lastEventAt: null,
@@ -162,14 +162,14 @@ const server = http.createServer((req, res) => {
       directRouteMode: 'path-dispatch',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v15-unified-multiroute',
-      directRelayImpl: 'ws-edgecache-v11-path-dispatch',
+      build: 'arvan-direct-realip-v16-unified-retry',
+      directRelayImpl: 'ws-edgecache-v12-backend-retry',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v15-unified-multiroute', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v16-unified-retry', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
@@ -522,10 +522,15 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
 
   const DIRECT_FRAME_CHUNK = 32 * 1024;
   const DIRECT_PENDING_MAX = 2 * 1024 * 1024;
+  const DIRECT_BACKEND_MAX_ATTEMPTS = 3;
+  const DIRECT_BACKEND_OPEN_TIMEOUT_MS = 5000;
+  const DIRECT_BACKEND_RETRY_DELAYS_MS = [120, 350];
 
   let client = null;
   let backend = null;
   let backendOpenTimer = null;
+  let backendRetryTimer = null;
+  let backendAttempt = 0;
   let closed = false;
   let backendReady = false;
   let authorized = false;
@@ -544,6 +549,7 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
     pending = [];
     pendingBytes = 0;
     if (backendOpenTimer) clearTimeout(backendOpenTimer);
+    if (backendRetryTimer) clearTimeout(backendRetryTimer);
     try { client && client.terminate(); } catch {}
     try { backend && backend.close(); } catch {}
     try { if (!client) socket.destroy(); } catch {}
@@ -615,19 +621,46 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
 
   const startBackend = () => {
     if (!authorized || backend || closed) return;
+    backendAttempt += 1;
     directDiagMark('backendStart');
 
-    backend = new WebSocket(directOriginUrl(d), {
+    const candidate = new WebSocket(directOriginUrl(d), {
       perMessageDeflate: false,
-      handshakeTimeout: 15000,
+      handshakeTimeout: DIRECT_BACKEND_OPEN_TIMEOUT_MS,
       maxPayload: MAX_WS,
     });
-    backend.binaryType = 'arraybuffer';
-    backendOpenTimer = setTimeout(() => {
-      if (!backendReady) closeAll('backend_open_timeout');
-    }, 15000);
+    backend = candidate;
+    candidate.binaryType = 'arraybuffer';
+    let attemptFailed = false;
 
-    backend.once('upgrade', (response) => {
+    const failAttempt = (reason) => {
+      if (attemptFailed || closed || backendReady || backend !== candidate) return;
+      attemptFailed = true;
+      if (backendOpenTimer) clearTimeout(backendOpenTimer);
+      backendOpenTimer = null;
+      backend = null;
+      try { candidate.terminate(); } catch {}
+
+      directDiagSet('lastError', String(reason && reason.message ? reason.message : reason));
+      if (backendAttempt >= DIRECT_BACKEND_MAX_ATTEMPTS) {
+        directDiagMark('backendExhausted');
+        closeAll('backend_attempts_exhausted');
+        return;
+      }
+
+      directDiagMark('backendRetry');
+      const delay = DIRECT_BACKEND_RETRY_DELAYS_MS[Math.min(backendAttempt - 1, DIRECT_BACKEND_RETRY_DELAYS_MS.length - 1)] || 0;
+      backendRetryTimer = setTimeout(() => {
+        backendRetryTimer = null;
+        startBackend();
+      }, delay);
+    };
+
+    backendOpenTimer = setTimeout(() => {
+      if (!backendReady && backend === candidate) failAttempt('backend_open_timeout');
+    }, DIRECT_BACKEND_OPEN_TIMEOUT_MS + 250);
+
+    candidate.once('upgrade', (response) => {
       try {
         const ray = String(response && response.headers && response.headers['cf-ray'] || '');
         if (ray) {
@@ -638,8 +671,12 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
       } catch {}
     });
 
-    backend.once('open', () => {
-      try { tuneSocket(backend._socket); } catch {}
+    candidate.once('open', () => {
+      if (attemptFailed || closed || backend !== candidate) {
+        try { candidate.terminate(); } catch {}
+        return;
+      }
+      try { tuneSocket(candidate._socket); } catch {}
       if (backendOpenTimer) clearTimeout(backendOpenTimer);
       backendOpenTimer = null;
       backendReady = true;
@@ -647,10 +684,10 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
       flushPending();
     });
 
-    backend.on('message', (data, isBinary) => {
+    candidate.on('message', (data, isBinary) => {
       directDiagMark('backendMessages');
       directDiagMark('bytesFromBackend', Buffer.byteLength(data));
-      if (closed || !client || !isBinary) {
+      if (closed || !client || !isBinary || backend !== candidate) {
         closeAll('backend_nonbinary_or_no_client');
         return;
       }
@@ -660,12 +697,23 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
         .catch((err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('client_send_error'); });
     });
 
-    backend.once('close', (code, reason) => {
+    candidate.once('close', (code, reason) => {
       directDiagSet('lastBackendCloseCode', Number(code));
       directDiagSet('lastBackendCloseReason', Buffer.from(reason || '').toString().slice(0, 120));
-      closeAll('backend_close_' + code);
+      if (!backendReady) {
+        failAttempt('backend_close_' + code);
+        return;
+      }
+      if (backend === candidate) closeAll('backend_close_' + code);
     });
-    backend.once('error', (err) => { directDiagSet('lastError', String(err && err.message || err)); closeAll('backend_error'); });
+    candidate.once('error', (err) => {
+      if (!backendReady) {
+        failAttempt(err || 'backend_error');
+        return;
+      }
+      directDiagSet('lastError', String(err && err.message || err));
+      if (backend === candidate) closeAll('backend_error');
+    });
   };
 
   const startAuthorization = () => {
