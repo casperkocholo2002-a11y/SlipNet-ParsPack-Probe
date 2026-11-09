@@ -189,14 +189,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: directBackendFallbackHosts().length,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v17-worker-failover',
-      directRelayImpl: 'ws-edgecache-v13-worker-failover',
+      build: 'arvan-direct-realip-v18-fast-failover',
+      directRelayImpl: 'ws-edgecache-v14-fast-failover',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v17-worker-failover', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v18-fast-failover', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
@@ -551,8 +551,8 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
   const DIRECT_PENDING_MAX = 2 * 1024 * 1024;
   const backendCandidates = directOriginCandidates(d);
   const DIRECT_BACKEND_MAX_ATTEMPTS = Math.max(3, backendCandidates.length);
-  const DIRECT_BACKEND_OPEN_TIMEOUT_MS = 5000;
-  const DIRECT_BACKEND_RETRY_DELAYS_MS = [120, 350, 650, 900];
+  const DIRECT_BACKEND_OPEN_TIMEOUT_MS = 3000;
+  const DIRECT_BACKEND_RETRY_DELAYS_MS = [80, 180, 350, 600];
 
   let client = null;
   let backend = null;
