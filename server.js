@@ -118,7 +118,7 @@ function directRouteCodeFromPath(pathname) {
   return code;
 }
 
-const DIRECT_MULTIROUTE_PRIMARY_HOST = envValue('DIRECT_MULTIROUTE_PRIMARY_HOST', 'directmultirouteprimaryhost') || 'slipnet-multiloc-unified-a1-20261109104932-b30702.edgecache-628bbe41dc.workers.dev';
+const DIRECT_MULTIROUTE_PRIMARY_HOST = envValue('DIRECT_MULTIROUTE_PRIMARY_HOST', 'directmultirouteprimaryhost') || 'cfws-test-1108.reoos.ir';
 
 function directRouteConfig(code) {
   if (!code) {
@@ -198,14 +198,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: 0,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v21-a1-primary',
-      directRelayImpl: 'ws-edgecache-v10-v14-core-a1-primary',
+      build: 'arvan-direct-realip-v23-arvan-proxied-origin',
+      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-proxied-origin',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v21-a1-primary', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v23-arvan-proxied-origin', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
