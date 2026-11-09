@@ -1,5 +1,3 @@
-[Reading 856 lines from start (total: 856 lines, 0 remaining)]
-
 'use strict';
 
 const http = require('http');
@@ -856,5 +854,3 @@ server.on('upgrade', (req, socket, head) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log('slipnet-parspack-ingress-probe listening on', PORT);
 });
-
-[executed on device: fastcreate-528183 (e7e63c15-207d-4800-baaa-c7f9badd0498)]
