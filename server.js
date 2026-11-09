@@ -1,3 +1,5 @@
+[Reading 856 lines from start (total: 856 lines, 0 remaining)]
+
 'use strict';
 
 const http = require('http');
@@ -79,6 +81,8 @@ function directOriginUrl(config) {
   return 'wss://' + authority + config.path;
 }
 
+let DIRECT_BACKEND_PREFERRED_HOST = null;
+
 function directBackendFallbackHosts() {
   const raw = envValue('DIRECT_BACKEND_FALLBACK_HOSTS', 'directbackendfallbackhosts');
   if (!raw) return [];
@@ -101,6 +105,10 @@ function directOriginCandidates(config) {
       servername: host,
       path: config.path,
     });
+  }
+  if (DIRECT_BACKEND_PREFERRED_HOST) {
+    const idx = out.findIndex((item) => item.host === DIRECT_BACKEND_PREFERRED_HOST);
+    if (idx > 0) out.unshift(out.splice(idx, 1)[0]);
   }
   return out;
 }
@@ -189,14 +197,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: directBackendFallbackHosts().length,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v18-fast-failover',
-      directRelayImpl: 'ws-edgecache-v14-fast-failover',
+      build: 'arvan-direct-realip-v19-adaptive-failover',
+      directRelayImpl: 'ws-edgecache-v15-adaptive-failover',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v18-fast-failover', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v19-adaptive-failover', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
@@ -551,8 +559,8 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
   const DIRECT_PENDING_MAX = 2 * 1024 * 1024;
   const backendCandidates = directOriginCandidates(d);
   const DIRECT_BACKEND_MAX_ATTEMPTS = Math.max(3, backendCandidates.length);
-  const DIRECT_BACKEND_OPEN_TIMEOUT_MS = 3000;
-  const DIRECT_BACKEND_RETRY_DELAYS_MS = [80, 180, 350, 600];
+  const DIRECT_BACKEND_OPEN_TIMEOUT_MS = 6000;
+  const DIRECT_BACKEND_RETRY_DELAYS_MS = [80, 180, 350];
 
   let client = null;
   let backend = null;
@@ -578,7 +586,13 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
     pendingBytes = 0;
     if (backendOpenTimer) clearTimeout(backendOpenTimer);
     if (backendRetryTimer) clearTimeout(backendRetryTimer);
-    try { client && client.terminate(); } catch {}
+    try {
+      if (client && client.readyState === WebSocket.OPEN) {
+        client.close(1011, String(reason && reason.message ? reason.message : reason).slice(0, 120));
+      } else if (client && client.readyState === WebSocket.CONNECTING) {
+        client.terminate();
+      }
+    } catch {}
     try { backend && backend.close(); } catch {}
     try { if (!client) socket.destroy(); } catch {}
   };
@@ -712,7 +726,9 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
       if (backendOpenTimer) clearTimeout(backendOpenTimer);
       backendOpenTimer = null;
       backendReady = true;
+      DIRECT_BACKEND_PREFERRED_HOST = candidateConfig.host;
       directDiagSet('lastBackendHost', candidateConfig.host);
+      directDiagSet('preferredBackendHost', DIRECT_BACKEND_PREFERRED_HOST);
       directDiagMark('backendOpen');
       flushPending();
     });
@@ -734,8 +750,13 @@ function handleDirectRelayWebSocket(req, socket, head, selectedRoute = null) {
       directDiagSet('lastBackendCloseCode', Number(code));
       directDiagSet('lastBackendCloseReason', Buffer.from(reason || '').toString().slice(0, 120));
       if (!backendReady) {
+        if (DIRECT_BACKEND_PREFERRED_HOST === candidateConfig.host) DIRECT_BACKEND_PREFERRED_HOST = null;
         failAttempt('backend_close_' + code);
         return;
+      }
+      if ((code === 1005 || code === 1006) && DIRECT_BACKEND_PREFERRED_HOST === candidateConfig.host) {
+        DIRECT_BACKEND_PREFERRED_HOST = null;
+        directDiagSet('preferredBackendHost', null);
       }
       if (backend === candidate) closeAll('backend_close_' + code);
     });
@@ -835,3 +856,5 @@ server.on('upgrade', (req, socket, head) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log('slipnet-parspack-ingress-probe listening on', PORT);
 });
+
+[executed on device: fastcreate-528183 (e7e63c15-207d-4800-baaa-c7f9badd0498)]
