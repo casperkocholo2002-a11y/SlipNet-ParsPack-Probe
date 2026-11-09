@@ -118,6 +118,8 @@ function directRouteCodeFromPath(pathname) {
   return code;
 }
 
+const DIRECT_MULTIROUTE_PRIMARY_HOST = envValue('DIRECT_MULTIROUTE_PRIMARY_HOST', 'directmultirouteprimaryhost') || 'slipnet-multiloc-unified-a1-20261109104932-b30702.edgecache-628bbe41dc.workers.dev';
+
 function directRouteConfig(code) {
   if (!code) {
     return {
@@ -128,9 +130,10 @@ function directRouteConfig(code) {
     };
   }
   const prefix = 'DIRECT_ROUTE_' + code + '_';
-  const host = envValue(prefix + 'HOST', (prefix + 'HOST').toLowerCase());
+  const configuredHost = envValue(prefix + 'HOST', (prefix + 'HOST').toLowerCase());
+  const host = DIRECT_MULTIROUTE_PRIMARY_HOST || configuredHost;
   const port = Number(envValue(prefix + 'PORT', (prefix + 'PORT').toLowerCase()) || 443);
-  const servername = envValue(prefix + 'SERVERNAME', (prefix + 'SERVERNAME').toLowerCase()) || host;
+  const servername = host;
   const path = envValue(prefix + 'PATH', (prefix + 'PATH').toLowerCase());
   const guardRoute = envValue(prefix + 'GUARD_ROUTE', (prefix + 'GUARD_ROUTE').toLowerCase()) || ('direct-' + code.toLowerCase());
   return {
@@ -195,14 +198,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: 0,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v20-v14-core',
-      directRelayImpl: 'ws-edgecache-v10-v14-core-multiroute',
+      build: 'arvan-direct-realip-v21-a1-primary',
+      directRelayImpl: 'ws-edgecache-v10-v14-core-a1-primary',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v20-v14-core', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v21-a1-primary', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
