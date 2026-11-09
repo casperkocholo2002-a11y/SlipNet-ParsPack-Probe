@@ -1,5 +1,3 @@
-[Reading 37 lines from start (total: 37 lines, 0 remaining)]
-
 name: Publish unified Arvan Route1 container
 
 on:
@@ -37,5 +35,3 @@ jobs:
           tags: ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:unified-arvan-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/casperkocholo2002-a11y/SlipNet-ParsPack-Probe
-
-[executed on device: fastcreate-528183 (e7e63c15-207d-4800-baaa-c7f9badd0498)]
