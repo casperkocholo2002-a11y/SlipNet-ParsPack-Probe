@@ -136,7 +136,7 @@ function directRouteConfig(code) {
   const port = Number(envValue(prefix + 'PORT', (prefix + 'PORT').toLowerCase()) || 443);
   const servername = host;
   const path = envValue(prefix + 'PATH', (prefix + 'PATH').toLowerCase()) || DIRECT_BUILTIN_ROUTE_PATHS[code] || '';
-  const guardRoute = envValue(prefix + 'GUARD_ROUTE', (prefix + 'GUARD_ROUTE').toLowerCase()) || ('direct-' + code.toLowerCase());
+  const guardRoute = 'direct-' + code.toLowerCase();
   return {
     code,
     publicPath: DIRECT_ROUTE_PREFIX + code.toLowerCase(),
@@ -199,14 +199,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: 0,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v26-12egress',
-      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-12egress',
+      build: 'arvan-direct-realip-v27-route-aware-guard',
+      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-route-aware-guard',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v26-12egress', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v27-route-aware-guard', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
