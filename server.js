@@ -119,7 +119,7 @@ function directRouteCodeFromPath(pathname) {
 }
 
 const DIRECT_MULTIROUTE_PRIMARY_HOST = envValue('DIRECT_MULTIROUTE_PRIMARY_HOST', 'directmultirouteprimaryhost') || 'cfws-test-1108.reoos.ir';
-const DIRECT_BUILTIN_ROUTE_PATHS = Object.freeze({ TUS: '/tor/us', TJP: '/tor/jp', TFR: '/tor/fr', TSE: '/tor/se', TAT: '/tor/at', TNO: '/tor/no', PCA: '/psi/ca', PGB: '/psi/gb', PSG: '/psi/sg' });
+const DIRECT_BUILTIN_ROUTE_PATHS = Object.freeze({ TUS: '/tor/us', TJP: '/tor/jp', TFR: '/tor/fr', TSE: '/tor/se', TAT: '/tor/at', TNO: '/tor/no', PCA: '/psi/ca', PGB: '/psi/gb', PSG: '/psi/sg', PUS: '/proton/us' });
 
 function directRouteConfig(code) {
   if (!code) {
@@ -199,14 +199,14 @@ const server = http.createServer((req, res) => {
       directBackendFallbackCount: 0,
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'arvan-direct-realip-v27-route-aware-guard',
-      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-route-aware-guard',
+      build: 'arvan-direct-realip-v28-proton-us',
+      directRelayImpl: 'ws-edgecache-v10-v14-core-arvan-route-aware-guard-proton-us',
       now: new Date().toISOString(),
     });
   }
 
   if (req.method === 'GET' && url.pathname === DIRECT_DIAG_PATH) {
-    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v27-route-aware-guard', diag: DIRECT_DIAG });
+    return json(res, 200, { ok: true, build: 'arvan-direct-realip-v28-proton-us', diag: DIRECT_DIAG });
   }
 
   if (req.method === 'GET' && url.pathname === '/direct-proxy-diag') {
