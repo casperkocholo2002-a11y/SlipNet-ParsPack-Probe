@@ -9,10 +9,11 @@ from pathlib import Path
 from .hub_control_plane import HubControlPlane
 
 class HubCompatAdapter:
-    def __init__(self, authority_path, telemetry_path, commands_path, alerts_path):
+    def __init__(self, authority_path, telemetry_path, commands_path, alerts_path, legacy_state_path=None):
         self.control = HubControlPlane(authority_path, telemetry_path)
         self.commands_path = Path(commands_path)
         self.alerts_path = Path(alerts_path)
+        self.legacy_state_path = Path(legacy_state_path) if legacy_state_path else None
 
     @staticmethod
     def _atomic_json(path, value):
@@ -42,13 +43,59 @@ class HubCompatAdapter:
             return default
 
     def seed_from_legacy(self, agent_db, legacy_snapshot):
-        return self.control.seed_from_legacy(agent_db, legacy_snapshot)
+        result = self.control.seed_from_legacy(agent_db, legacy_snapshot)
+        self._ensure_identity_records()
+        return result
 
     def desired_snapshot(self):
         return self.control.desired_snapshot()
 
-    def ingest_telemetry(self, payload):
-        return self.control.telemetry.ingest(payload)
+    def ingest_telemetry(self, payload, mirror=False):
+        result = self.control.telemetry.ingest(payload)
+        if mirror:
+            self.mirror_legacy_state()
+        return result
+
+    def _identity_records(self):
+        now = int(time.time())
+        records = []
+        for user in self.control.desired_snapshot().get("users") or []:
+            name = str(user.get("name") or "")
+            raw_uuid = str(user.get("uuid") or "")
+            links, bundle = self.control._route_links(name, raw_uuid)
+            records.append({
+                "id": "no95-identity-" + name,
+                "op": "_identity",
+                "args": {"name": name},
+                "status": "done",
+                "created_at": now,
+                "completed_at": now,
+                "last_delivery": 0,
+                "deliveries": 0,
+                "result": {"name": name, "links": links, "bundle": bundle},
+                "error": None,
+            })
+        return records
+
+    def _ensure_identity_records(self, doc=None):
+        if doc is None:
+            doc = self._load(self.commands_path, {"version": 1, "commands": []})
+        existing = [
+            row for row in (doc.get("commands") or [])
+            if not str((row or {}).get("id") or "").startswith("no95-identity-")
+        ]
+        identities = self._identity_records()
+        keep = max(0, 500 - len(identities))
+        doc["commands"] = existing[-keep:] + identities if keep else identities[-500:]
+        self._atomic_json(self.commands_path, doc)
+        return doc
+
+    def mirror_legacy_state(self):
+        if self.legacy_state_path is None:
+            return
+        snap = self.control.dashboard_snapshot()
+        snap["received_at"] = int(time.time())
+        self._atomic_json(self.legacy_state_path, {"version": 1, "snapshot": snap})
 
     def enqueue(self, op, args):
         now = int(time.time())
@@ -77,8 +124,9 @@ class HubCompatAdapter:
         doc = self._load(self.commands_path, {"version": 1, "commands": []})
         commands = doc.setdefault("commands", [])
         commands.append(cmd)
-        doc["commands"] = commands[-500:]
-        self._atomic_json(self.commands_path, doc)
+        doc["commands"] = commands
+        self._ensure_identity_records(doc)
+        self.mirror_legacy_state()
 
         return {
             "success": True,
@@ -99,6 +147,7 @@ class HubCompatAdapter:
         return alerts if isinstance(alerts, list) else []
 
     def get_status(self):
+        self.mirror_legacy_state()
         snap = self.control.dashboard_snapshot()
         route = self.control.telemetry.route_snapshot()
         selectors = self.control.telemetry.state.get("selectors") or {}
