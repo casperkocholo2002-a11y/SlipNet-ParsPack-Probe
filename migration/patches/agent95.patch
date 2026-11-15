@@ -1,0 +1,22 @@
+--- agent.py.before
++++ agent.py.after
+@@ -465,9 +465,18 @@
+     db = load_db()
+     if name in db["users"]:
+         raise ValueError("User already exists")
++    requested_uuid = str(args.get("uuid") or "").strip()
++    if requested_uuid:
++        try:
++            user_uuid = str(uuid.UUID(requested_uuid))
++        except Exception:
++            raise ValueError("Invalid UUID")
++    else:
++        user_uuid = str(uuid.uuid4())
++
+     created = now()
+     user = {
+-        "uuid": str(uuid.uuid4()),
++        "uuid": user_uuid,
+         "created_at": created,
+         "expires_at": created + days * 86400 if days else 0,
+         "quota_bytes": quota,
