@@ -357,6 +357,14 @@ class TelemetryAggregator:
             "routes": routes,
         }
 
+    def reset_usage(self, name):
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("missing user name")
+        self.state.setdefault("usage", {})[name] = 0
+        self._save()
+        return {"name": name, "used_bytes": 0}
+
     def user_public(self, authority_user, now=None):
         now = int(now or time.time())
         row = dict(authority_user)
