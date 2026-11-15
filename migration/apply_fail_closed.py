@@ -82,7 +82,7 @@ def main():
             patch_bytes=patch_path.read_bytes()
             run(["patch","--batch",str(candidate)],input_bytes=patch_bytes)
 
-            if candidate.suffix==".py":
+            if target.suffix==".py":
                 run([sys.executable,"-m","py_compile",str(candidate)])
 
             patched=sha256(candidate)
