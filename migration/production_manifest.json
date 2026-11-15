@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "generated_for": "no95-fabric-migration",
+  "branch": "shadow-no95-fabric-20261115",
+  "shadow_image": "ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:no95-shadow-ad4e5d33a116e58168fe122f4e9e56bedc6a4e91",
+  "production_inputs": {
+    "server155": {
+      "/root/v2ray_hub.py": {
+        "expected_sha256": "454fb140a610814f47977a221034099e79f5a4fb2e546147a49d3f3e26b68d3a",
+        "patched_sha256": "4d50971ca23b63bb0e98d4797766a9ff94286698bcc71522096edead34f66371",
+        "patch": "migration/patches/v2ray_hub.patch"
+      },
+      "/root/slipnet_monitor.py": {
+        "expected_sha256": "33ecabffa037e447ac9e9b775dc1427f12c9e8027c6b4336b113a1a3922383f6",
+        "patched_sha256": "2b81963a938419392dccf6b3c81f7c323cb3b38d692f3f65812435a959da143b",
+        "patch": "migration/patches/slipnet_monitor.patch"
+      }
+    },
+    "server95": {
+      "/opt/slipnet-v2ray-agent/agent.py": {
+        "expected_sha256": "1ccc686c92a105b2f0a4a3ce5b1562369943130ded74a21063c835185ead455f",
+        "patched_sha256": "c9189c656d30ea9a935962daea27f4cab0d3d427e03001a107306ad4b39fdee1",
+        "patch": "migration/patches/agent95.patch"
+      }
+    }
+  },
+  "patch_sha256": {
+    "migration/patches/v2ray_hub.patch": "8a2e9bd4f3581ca8299f9a569a3e5b0952a6e5b1abdb0697202e4ae818a05f7c",
+    "migration/patches/slipnet_monitor.patch": "dc0f1658568e67b5b7263ffac4468d366edb8c798fc78b718af485610fba8186",
+    "migration/patches/agent95.patch": "16b5cd2367984ca6cfd59729fc549a2b5660d2faff6d8277a67fd45a46f7df96"
+  },
+  "services": {
+    "server155": [
+      "slipnet-monitor.service"
+    ],
+    "server95": [
+      "slipnet-v2ray-agent.service"
+    ]
+  },
+  "flags": {
+    "control": "/etc/slipnet-v2ray-hub/no95-control.enabled",
+    "dualwrite": "/etc/slipnet-v2ray-hub/no95-dualwrite.enabled"
+  }
+}
