@@ -2,7 +2,7 @@
   "version": 1,
   "generated_for": "no95-fabric-migration",
   "branch": "shadow-no95-fabric-20261115",
-  "shadow_image": "ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:no95-shadow-ad4e5d33a116e58168fe122f4e9e56bedc6a4e91",
+  "shadow_image": "ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:no95-shadow-3d18beb2559ba1b4abdabd5a591993b5e3d824f9",
   "production_inputs": {
     "server155": {
       "/root/v2ray_hub.py": {
@@ -40,5 +40,28 @@
   "flags": {
     "control": "/etc/slipnet-v2ray-hub/no95-control.enabled",
     "dualwrite": "/etc/slipnet-v2ray-hub/no95-dualwrite.enabled"
+  },
+  "module_bundle": {
+    "server155": {
+      "destination_root": "/opt/slipnet-no95",
+      "files": {
+        "migration/__init__.py": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mode": "0644"
+        },
+        "migration/hub_compat_adapter.py": {
+          "sha256": "7cf1adc8c85c7c8ae317c8523879bb49cba04997befa67c37f4931b16b8049af",
+          "mode": "0644"
+        },
+        "migration/hub_control_plane.py": {
+          "sha256": "d41da361230fb2285f48be7c08010dae03501ef08d58b61d2c108ef676e04b9f",
+          "mode": "0644"
+        },
+        "migration/hub_telemetry_aggregator.py": {
+          "sha256": "02b2d50965950e0d51455ef4872601bf836797bacd7582de878cd792bf4e566e",
+          "mode": "0644"
+        }
+      }
+    }
   }
 }
