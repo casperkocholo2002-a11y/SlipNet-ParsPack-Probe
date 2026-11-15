@@ -146,8 +146,9 @@ class HubCompatAdapter:
         alerts = doc.get("alerts")
         return alerts if isinstance(alerts, list) else []
 
-    def get_status(self):
-        self.mirror_legacy_state()
+    def get_status(self, mirror=True):
+        if mirror:
+            self.mirror_legacy_state()
         snap = self.control.dashboard_snapshot()
         route = self.control.telemetry.route_snapshot()
         selectors = self.control.telemetry.state.get("selectors") or {}
