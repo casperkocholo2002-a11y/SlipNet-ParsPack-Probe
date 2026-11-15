@@ -1,0 +1,121 @@
+--- v2ray_hub.py.before
++++ v2ray_hub.py.after
+@@ -896,3 +896,118 @@
+     expected = hmac.new(raw_uuid.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+     return hmac.compare_digest(str(proof or "").strip().lower(), expected)
+ # --- END CONCURRENCY GUARD V2 ---
++
++
++# --- NO95 FABRIC MIGRATION BRIDGE ---
++import sys as _no95_sys
++
++_NO95_MODULE_DIR = Path(os.environ.get("SLIPNET_NO95_MODULE_DIR", "/opt/slipnet-no95"))
++_NO95_BASE = Path(os.environ.get("SLIPNET_NO95_BASE", "/var/lib/slipnet-v2ray-hub"))
++_NO95_ETC = Path(os.environ.get("SLIPNET_NO95_ETC", "/etc/slipnet-v2ray-hub"))
++_NO95_CONTROL_FLAG = _NO95_ETC / "no95-control.enabled"
++_NO95_DUALWRITE_FLAG = _NO95_ETC / "no95-dualwrite.enabled"
++_NO95_AUTHORITY_TOKEN = _NO95_ETC / "no95-authority.token"
++_NO95_TELEMETRY_TOKENS = {
++    "arvan": _NO95_ETC / "no95-telemetry-arvan.token",
++    "parspack": _NO95_ETC / "no95-telemetry-parspack.token",
++}
++_NO95_ADAPTER_INSTANCE = None
++_NO95_IMPORT_ERROR = None
++try:
++    if str(_NO95_MODULE_DIR) not in _no95_sys.path:
++        _no95_sys.path.insert(0, str(_NO95_MODULE_DIR))
++    from migration.hub_compat_adapter import HubCompatAdapter as _No95HubCompatAdapter
++except Exception as _no95_exc:
++    _No95HubCompatAdapter = None
++    _NO95_IMPORT_ERROR = str(_no95_exc)[:500]
++
++def _no95_adapter():
++    global _NO95_ADAPTER_INSTANCE
++    if _No95HubCompatAdapter is None:
++        raise RuntimeError("no95 migration modules unavailable: " + str(_NO95_IMPORT_ERROR or "unknown"))
++    if _NO95_ADAPTER_INSTANCE is None:
++        _NO95_ADAPTER_INSTANCE = _No95HubCompatAdapter(
++            _NO95_BASE / "no95-authority.json",
++            _NO95_BASE / "no95-telemetry.json",
++            COMMANDS_FILE,
++            ALERTS_FILE,
++            STATE_FILE,
++        )
++    return _NO95_ADAPTER_INSTANCE
++
++def no95_control_enabled():
++    return _NO95_CONTROL_FLAG.exists()
++
++def no95_dualwrite_enabled():
++    return no95_control_enabled() and _NO95_DUALWRITE_FLAG.exists()
++
++def _no95_verify_bearer(header, token_file):
++    supplied = str(header or "").strip()
++    if not supplied or not token_file.exists():
++        return False
++    try:
++        token = token_file.read_text().strip()
++    except Exception:
++        return False
++    if not token:
++        return False
++    return hmac.compare_digest(supplied, "Bearer " + token)
++
++def verify_no95_authority_header(header):
++    return _no95_verify_bearer(header, _NO95_AUTHORITY_TOKEN)
++
++def verify_no95_telemetry_header(header, ingress):
++    token_file = _NO95_TELEMETRY_TOKENS.get(str(ingress or "").strip().lower())
++    return bool(token_file and _no95_verify_bearer(header, token_file))
++
++def no95_desired_snapshot():
++    return _no95_adapter().desired_snapshot()
++
++def no95_ingest_telemetry(payload):
++    return _no95_adapter().ingest_telemetry(
++        payload,
++        mirror=(no95_control_enabled() and not no95_dualwrite_enabled()),
++    )
++
++def no95_seed_from_legacy(agent_db, legacy_snapshot):
++    return _no95_adapter().seed_from_legacy(agent_db, legacy_snapshot)
++
++_NO95_LEGACY_BASE_GET_STATUS = _base_get_status
++_NO95_LEGACY_BASE_ENQUEUE = _base_enqueue
++
++def _no95_dynamic_base_get_status():
++    if no95_control_enabled():
++        return _no95_adapter().get_status(
++            mirror=not no95_dualwrite_enabled(),
++        )
++    return _NO95_LEGACY_BASE_GET_STATUS()
++
++def _no95_dynamic_base_enqueue(op, args):
++    if not no95_control_enabled():
++        return _NO95_LEGACY_BASE_ENQUEUE(op, args)
++
++    adapter = _no95_adapter()
++    dualwrite = no95_dualwrite_enabled()
++    result = adapter.enqueue(op, args, mirror=not dualwrite)
++    if not dualwrite:
++        return result
++
++    command = adapter.get_command(result.get("command_id")).get("command") or {}
++    if command.get("status") != "done":
++        return result
++
++    legacy_args = dict(args or {})
++    if str(op or "") == "add":
++        name = str(legacy_args.get("name") or "").strip()
++        desired = adapter.desired_snapshot()
++        match = next((u for u in desired.get("users") or [] if str(u.get("name") or "") == name), None)
++        if not match or not match.get("uuid"):
++            raise RuntimeError("no95 dual-write add UUID unavailable")
++        legacy_args["uuid"] = str(match["uuid"])
++
++    _NO95_LEGACY_BASE_ENQUEUE(op, legacy_args)
++    return result
++
++_base_get_status = _no95_dynamic_base_get_status
++_base_enqueue = _no95_dynamic_base_enqueue
++# --- END NO95 FABRIC MIGRATION BRIDGE ---
