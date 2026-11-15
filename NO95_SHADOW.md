@@ -9,7 +9,8 @@ Safety rules:
 - egress routes continue through the existing ArvanEdge / Arvan CaaS / ParsPack PaaS fronts;
 - user authority is supplied by a cached manifest;
 - an unavailable manifest source does not delete the last valid cache;
-- missing cache on first boot fails closed with zero admitted users.
+- missing cache on first boot fails closed with zero admitted users;
+- GHCR publishing uses only the `no95-shadow-<sha>` tag.
 
 Processes inside the shadow image:
 1. public Node relay + real-IP/session guard;
@@ -19,4 +20,13 @@ Processes inside the shadow image:
 5. Smart Egress selector copied from the current Server95 implementation;
 6. manifest controller.
 
-The production cutover is forbidden until two-container quota aggregation and dashboard desired-state persistence are proven separately.
+Authority shadow:
+- preserves Dashboard `command_id -> pending -> done/result` semantics;
+- reconstructs existing UUIDs from completed command history;
+- aggregates usage independently from Arvan and ParsPack nodes;
+- enforces enabled / expiry / quota in the shared manifest;
+- preserves the existing public VLESS links and `/tunnel` path;
+- distributes route preference to both selectors;
+- accepts authenticated usage + selector reports from both ingress nodes.
+
+Production cutover remains forbidden until the Hub patch is staged and both provider-side shadow apps pass E2E with the exact current user configurations.
