@@ -12,7 +12,7 @@
       },
       "/root/slipnet_monitor.py": {
         "expected_sha256": "33ecabffa037e447ac9e9b775dc1427f12c9e8027c6b4336b113a1a3922383f6",
-        "patched_sha256": "2b81963a938419392dccf6b3c81f7c323cb3b38d692f3f65812435a959da143b",
+        "patched_sha256": "36f77c38343f175dbce0ecc03849be44335c5569eca892dac211b82832b7d6c6",
         "patch": "migration/patches/slipnet_monitor.patch"
       }
     },
@@ -25,7 +25,7 @@
     }
   },
   "patch_sha256": {
-    "migration/patches/v2ray_hub.patch": "8a2e9bd4f3581ca8299f9a569a3e5b0952a6e5b1abdb0697202e4ae818a05f7c",
+    "migration/patches/v2ray_hub.patch": "3dbbc43108264772bad01bf20ad1e6ed03ef061f1fad8c709e4761efcce4c833",
     "migration/patches/slipnet_monitor.patch": "dc0f1658568e67b5b7263ffac4468d366edb8c798fc78b718af485610fba8186",
     "migration/patches/agent95.patch": "16b5cd2367984ca6cfd59729fc549a2b5660d2faff6d8277a67fd45a46f7df96"
   },
