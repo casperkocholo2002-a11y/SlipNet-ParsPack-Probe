@@ -1,10 +1,9 @@
 --- v2ray_hub.py.before
 +++ v2ray_hub.py.after
-@@ -896,3 +896,118 @@
-     expected = hmac.new(raw_uuid.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+@@ -897,3 +897,117 @@
      return hmac.compare_digest(str(proof or "").strip().lower(), expected)
  # --- END CONCURRENCY GUARD V2 ---
-+
+ 
 +
 +# --- NO95 FABRIC MIGRATION BRIDGE ---
 +import sys as _no95_sys
