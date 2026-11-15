@@ -11,6 +11,7 @@ on:
       - shadow_entrypoint.py
       - authority_sync.py
       - telemetry_reporter.py
+      - control_relay.py
       - Dockerfile.shadow
       - package.json
       - package-lock.json
