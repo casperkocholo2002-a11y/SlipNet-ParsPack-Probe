@@ -24,7 +24,7 @@ def _fmt_bytes(value):
         if n < 1024.0 or unit == units[-1]:
             if unit == "B":
                 return f"{int(n)} B"
-            return f"{n:.2f} {unit}"
+            return f"{n:.1f} {unit}"
         n /= 1024.0
 
 def _default_state():
