@@ -1,0 +1,49 @@
+--- slipnet_monitor.py.before
++++ slipnet_monitor.py.after
+@@ -2644,6 +2644,18 @@
+ 
+         # SlipNet V2Ray agent channel. This endpoint intentionally bypasses
+         # browser Basic Auth and uses a separate derived bearer key.
++        if parsed.path == '/api/v2ray-no95/authority':
++            if not v2ray_hub.verify_no95_authority_header(
++                self.headers.get('Authorization', ''),
++            ):
++                self.send_json({"success": False, "error": "Forbidden"}, 403)
++                return
++            try:
++                self.send_json(v2ray_hub.no95_desired_snapshot())
++            except Exception:
++                self.send_json({"success": False, "error": "Authority unavailable"}, 503)
++            return
++
+         if parsed.path == '/api/v2ray-agent/poll':
+             if not v2ray_hub.verify_agent_header(
+                 self.headers.get('Authorization', ''),
+@@ -2950,6 +2962,27 @@
+ 
+         parsed = urlparse(self.path)
+ 
++        if parsed.path == '/api/v2ray-no95/telemetry':
++            try:
++                length = int(self.headers.get('Content-Length', '0') or 0)
++                if length < 1 or length > 262144:
++                    raise ValueError("Invalid telemetry size")
++                payload = json.loads(self.rfile.read(length).decode('utf-8'))
++                ingress = str(payload.get('ingress') or '').strip().lower()
++                if not v2ray_hub.verify_no95_telemetry_header(
++                    self.headers.get('Authorization', ''),
++                    ingress,
++                ):
++                    self.send_json({"success": False, "error": "Forbidden"}, 403)
++                    return
++                result = v2ray_hub.no95_ingest_telemetry(payload)
++                self.send_json(result)
++            except ValueError as e:
++                self.send_json({"success": False, "error": str(e)[:200]}, 400)
++            except Exception:
++                self.send_json({"success": False, "error": "Fabric telemetry unavailable"}, 503)
++            return
++
+         if parsed.path == '/api/v2ray-session/telemetry':
+             try:
+                 length=int(self.headers.get('Content-Length','0') or 0)
