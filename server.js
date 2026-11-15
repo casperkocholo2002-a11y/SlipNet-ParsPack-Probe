@@ -20,7 +20,7 @@ const LOCAL_VLESS_ORIGIN = envValue('LOCAL_VLESS_ORIGIN', 'localvlessorigin') ==
 const LOCAL_VLESS_HOST = envValue('LOCAL_VLESS_HOST', 'localvlesshost') || '127.0.0.1';
 const LOCAL_VLESS_PORT = Number(envValue('LOCAL_VLESS_PORT', 'localvlessport') || 19443);
 const V2_SESSION_GUARD = createSessionGuard({
-  route: 'arvan',
+  route: envValue('SESSION_GUARD_ROUTE', 'sessionguardroute') || 'arvan',
   telemetryUrl:
     envValue('SESSION_TELEMETRY_URL', 'sessiontelemetryurl') ||
     'https://monitor.reoos.ir/api/v2ray-session/telemetry',
