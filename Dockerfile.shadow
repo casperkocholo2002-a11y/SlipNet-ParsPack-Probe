@@ -1,0 +1,37 @@
+FROM golang:1.27.2-alpine AS xray-build
+
+RUN apk add --no-cache git ca-certificates
+RUN mkdir -p /src/xray \
+ && cd /src/xray \
+ && git init \
+ && git remote add origin https://github.com/XTLS/Xray-core.git \
+ && git fetch --depth 1 origin 701af60772cda123492f86e383e1fdba066614a9 \
+ && git checkout --detach FETCH_HEAD
+WORKDIR /src/xray
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/xray ./main
+
+FROM node:24.22.2-alpine
+
+RUN apk add --no-cache python3 curl ca-certificates
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY server.js session_guard.js smart_egress.py shadow_entrypoint.py ./
+COPY --from=xray-build /out/xray /usr/local/bin/xray
+
+RUN mkdir -p /run/slipnet-smart-egress /var/lib/slipnet-smart-egress /tmp/slipnet-shadow \
+ && chown -R node:node /app /run/slipnet-smart-egress /var/lib/slipnet-smart-egress /tmp/slipnet-shadow \
+ && chmod 755 /usr/local/bin/xray /app/shadow_entrypoint.py /app/smart_egress.py
+
+ENV NODE_ENV=production
+ENV PORT=8080
+ENV LOCAL_VLESS_ORIGIN=1
+ENV LOCAL_VLESS_HOST=127.0.0.1
+ENV LOCAL_VLESS_PORT=19443
+
+EXPOSE 8080
+USER node
+
+ENTRYPOINT ["python3", "/app/shadow_entrypoint.py"]
