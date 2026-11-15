@@ -17,7 +17,7 @@ function envValue(primary, fallback) {
 
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
 const V2_SESSION_GUARD = createSessionGuard({
-  route: 'arvan',
+  route: envValue('SESSION_GUARD_ROUTE', 'sessionguardroute') || 'arvan',
   telemetryUrl:
     envValue('SESSION_TELEMETRY_URL', 'sessiontelemetryurl') ||
     'https://monitor.reoos.ir/api/v2ray-session/telemetry',
@@ -25,6 +25,9 @@ const V2_SESSION_GUARD = createSessionGuard({
   requestTimeoutMs: 1800,
 });
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
+const LOCAL_VLESS_ORIGIN = envValue('LOCAL_VLESS_ORIGIN', 'localvlessorigin') === '1';
+const LOCAL_VLESS_HOST = envValue('LOCAL_VLESS_HOST', 'localvlesshost') || '127.0.0.1';
+const LOCAL_VLESS_PORT = Number(envValue('LOCAL_VLESS_PORT', 'localvlessport') || 29443);
 
 function directOriginConfig() {
   const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
@@ -65,7 +68,7 @@ const server = http.createServer((req, res) => {
       ok: true,
       service: 'slipnet-parspack-ingress-probe',
       node: process.version,
-      relayConfigured: Boolean(
+      relayConfigured: LOCAL_VLESS_ORIGIN || Boolean(
         envValue('ORIGIN_HOST', 'originhost') &&
         Number(envValue('ORIGIN_PORT', 'originport') || 0) &&
         envValue('ORIGIN_SERVERNAME', 'originservername')
@@ -80,7 +83,7 @@ const server = http.createServer((req, res) => {
       directRelayMode: 'wss',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'graceful-drain-relay-v9-realip-guard',
+      build: LOCAL_VLESS_ORIGIN ? 'no95-shadow-v1' : 'graceful-drain-relay-v9-realip-guard',
       now: new Date().toISOString(),
     });
   }
@@ -334,11 +337,21 @@ function handleEchoWebSocket(req, socket, head) {
 }
 
 function handlePrimaryRelayWebSocket(req, socket, head) {
-  const originHost = envValue('ORIGIN_HOST', 'originhost');
-  const originPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
+  const originHost = LOCAL_VLESS_ORIGIN
+    ? LOCAL_VLESS_HOST
+    : envValue('ORIGIN_HOST', 'originhost');
+  const originPort = LOCAL_VLESS_ORIGIN
+    ? LOCAL_VLESS_PORT
+    : Number(envValue('ORIGIN_PORT', 'originport') || 0);
   const originServername = envValue('ORIGIN_SERVERNAME', 'originservername');
 
-  if (!originHost || !originServername || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
+  if (
+    !originHost ||
+    !Number.isInteger(originPort) ||
+    originPort < 1 ||
+    originPort > 65535 ||
+    (!LOCAL_VLESS_ORIGIN && !originServername)
+  ) {
     return rejectUpgrade(socket);
   }
 
@@ -346,17 +359,19 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
   let clientStream = null;
   let closed = false;
 
-  const origin = tls.connect({
-    host: originHost,
-    port: originPort,
-    servername: undefined,
-    rejectUnauthorized: true,
-    checkServerIdentity: (_networkHost, cert) =>
-      tls.checkServerIdentity(originServername, cert),
-    minVersion: 'TLSv1.3',
-    ALPNProtocols: ['http/1.1'],
-    highWaterMark: 1024 * 1024,
-  });
+  const origin = LOCAL_VLESS_ORIGIN
+    ? net.connect({ host: originHost, port: originPort, highWaterMark: 1024 * 1024 })
+    : tls.connect({
+        host: originHost,
+        port: originPort,
+        servername: undefined,
+        rejectUnauthorized: true,
+        checkServerIdentity: (_networkHost, cert) =>
+          tls.checkServerIdentity(originServername, cert),
+        minVersion: 'TLSv1.3',
+        ALPNProtocols: ['http/1.1'],
+        highWaterMark: 1024 * 1024,
+      });
   tuneSocket(origin);
 
   const closeAll = () => {
@@ -373,7 +388,8 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
     closeAll();
   });
 
-  origin.once('secureConnect', () => {
+  const readyEvent = LOCAL_VLESS_ORIGIN ? 'connect' : 'secureConnect';
+  origin.once(readyEvent, () => {
     origin.setTimeout(0);
 
     acceptWebSocket(req, socket, head, (ws) => {

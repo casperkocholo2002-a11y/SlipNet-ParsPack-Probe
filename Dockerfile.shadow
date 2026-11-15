@@ -1,0 +1,23 @@
+FROM ghcr.io/xtls/xray-core:latest AS xray
+
+FROM ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:emergency-arvan-5ce4ff10f3dc31e619014cc24843c1392d23fd14
+USER root
+RUN apk add --no-cache python3 curl ca-certificates
+COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
+
+WORKDIR /app
+COPY server.js session_guard.js ./
+COPY shadow /opt/slipnet-shadow
+
+RUN mkdir -p /etc/slipnet-shadow /run/slipnet-smart-egress /var/lib/slipnet-smart-egress /var/lib/slipnet-shadow \
+ && chown -R node:node /app /etc/slipnet-shadow /run/slipnet-smart-egress /var/lib/slipnet-smart-egress /var/lib/slipnet-shadow /opt/slipnet-shadow
+
+ENV NODE_ENV=production \
+    PORT=8080 \
+    LOCAL_VLESS_ORIGIN=1 \
+    LOCAL_VLESS_HOST=127.0.0.1 \
+    LOCAL_VLESS_PORT=29443
+
+EXPOSE 8080
+USER node
+CMD ["python3","/opt/slipnet-shadow/supervisor.py"]
