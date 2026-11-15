@@ -9,7 +9,8 @@ from pathlib import Path
 
 XRAY = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
 XRAY_API = os.environ.get("XRAY_API", "127.0.0.1:19182")
-INBOUND_TAG = os.environ.get("XRAY_INBOUND_TAG", "shadow-vless")\nINGRESS_CONFIG = Path(os.environ.get("XRAY_INGRESS_CONFIG", "/tmp/slipnet-shadow/ingress.json"))
+INBOUND_TAG = os.environ.get("XRAY_INBOUND_TAG", "shadow-vless")
+INGRESS_CONFIG = Path(os.environ.get("XRAY_INGRESS_CONFIG", "/tmp/slipnet-shadow/ingress.json"))
 AUTHORITY_URL = os.environ.get("AUTHORITY_URL", "").strip()
 AUTHORITY_TOKEN = os.environ.get("AUTHORITY_TOKEN", "").strip()
 POLL_S = max(2, int(os.environ.get("AUTHORITY_POLL_S", "5")))
