@@ -9,6 +9,7 @@ on:
       - session_guard.js
       - smart_egress.py
       - shadow_entrypoint.py
+      - authority_sync.py
       - Dockerfile.shadow
       - package.json
       - package-lock.json
