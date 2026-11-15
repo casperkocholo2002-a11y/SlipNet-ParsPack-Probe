@@ -9,7 +9,7 @@ from pathlib import Path
 
 XRAY = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
 XRAY_API = os.environ.get("XRAY_API", "127.0.0.1:19182")
-INBOUND_TAG = os.environ.get("XRAY_INBOUND_TAG", "shadow-vless")
+INBOUND_TAG = os.environ.get("XRAY_INBOUND_TAG", "shadow-vless")\nINGRESS_CONFIG = Path(os.environ.get("XRAY_INGRESS_CONFIG", "/tmp/slipnet-shadow/ingress.json"))
 AUTHORITY_URL = os.environ.get("AUTHORITY_URL", "").strip()
 AUTHORITY_TOKEN = os.environ.get("AUTHORITY_TOKEN", "").strip()
 POLL_S = max(2, int(os.environ.get("AUTHORITY_POLL_S", "5")))
@@ -98,23 +98,25 @@ def run(args, timeout=12):
     return p.returncode, text
 
 def runtime_add(name, item):
-    inbound = {
-        "tag": INBOUND_TAG,
-        "listen": "127.0.0.1",
-        "port": 19443,
-        "protocol": "vless",
-        "settings": {
-            "clients": [{"id": item["uuid"], "email": item["email"]}],
-            "decryption": "none",
-        },
-    }
+    source = json.loads(INGRESS_CONFIG.read_text())
+    inbound = None
+    for candidate in source.get("inbounds") or []:
+        if isinstance(candidate, dict) and candidate.get("tag") == INBOUND_TAG:
+            inbound = json.loads(json.dumps(candidate))
+            break
+    if inbound is None:
+        raise RuntimeError("runtime add source inbound not found: " + INBOUND_TAG)
+
+    settings = inbound.setdefault("settings", {})
+    settings["clients"] = [{"id": item["uuid"], "email": item["email"]}]
+
     fd, path = tempfile.mkstemp(prefix="no95-user-", suffix=".json", dir="/tmp")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump({"inbounds": [inbound]}, f)
         rc, text = run([XRAY, "api", "adu", "--server=" + XRAY_API, path])
         if rc != 0 or "Added 1 user(s)" not in text:
-            raise RuntimeError("runtime add failed: " + text[-500:])
+            raise RuntimeError("runtime add failed: " + text[-1000:])
     finally:
         try:
             os.unlink(path)
