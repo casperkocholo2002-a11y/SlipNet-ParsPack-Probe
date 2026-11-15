@@ -18,12 +18,12 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY server.js session_guard.js smart_egress.py shadow_entrypoint.py ./
+COPY server.js session_guard.js smart_egress.py shadow_entrypoint.py authority_sync.py ./
 COPY --from=xray-build /out/xray /usr/local/bin/xray
 
 RUN mkdir -p /run/slipnet-smart-egress /var/lib/slipnet-smart-egress /tmp/slipnet-shadow \
  && chown -R node:node /app /run/slipnet-smart-egress /var/lib/slipnet-smart-egress /tmp/slipnet-shadow \
- && chmod 755 /usr/local/bin/xray /app/shadow_entrypoint.py /app/smart_egress.py
+ && chmod 755 /usr/local/bin/xray /app/shadow_entrypoint.py /app/smart_egress.py /app/authority_sync.py
 
 ENV NODE_ENV=production
 ENV PORT=8080
