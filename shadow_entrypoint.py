@@ -241,6 +241,10 @@ def main():
         start("authority-sync", ["python3", str(APP / "authority_sync.py")])
         time.sleep(0.5)
 
+    if env("TELEMETRY_URL", "").strip():
+        start("telemetry-reporter", ["python3", str(APP / "telemetry_reporter.py")])
+        time.sleep(0.5)
+
     node_env = {
         "LOCAL_VLESS_ORIGIN": "1",
         "LOCAL_VLESS_HOST": "127.0.0.1",
