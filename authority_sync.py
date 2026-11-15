@@ -100,6 +100,8 @@ def run(args, timeout=12):
 def runtime_add(name, item):
     inbound = {
         "tag": INBOUND_TAG,
+        "listen": "127.0.0.1",
+        "port": 19443,
         "protocol": "vless",
         "settings": {
             "clients": [{"id": item["uuid"], "email": item["email"]}],
