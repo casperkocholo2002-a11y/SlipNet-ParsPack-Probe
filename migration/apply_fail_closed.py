@@ -35,6 +35,26 @@ def load_manifest(path):
         raise RuntimeError("unsupported manifest version")
     return d
 
+def repo_file(repo, relative_path):
+    candidate=(repo/str(relative_path)).resolve()
+    try:
+        candidate.relative_to(repo)
+    except ValueError:
+        raise RuntimeError(f"repo path escapes root: {relative_path}")
+    return candidate
+
+def parse_mode(value):
+    raw=str(value or "0644").strip().lower()
+    if raw.startswith("0o"):
+        raw=raw[2:]
+    try:
+        mode=int(raw,8)
+    except Exception:
+        raise RuntimeError(f"invalid file mode: {value}")
+    if mode<0 or mode>0o7777:
+        raise RuntimeError(f"invalid file mode: {value}")
+    return mode
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--role",choices=("server155","server95"),required=True)
@@ -52,6 +72,7 @@ def main():
         raise RuntimeError("no manifest entries for role")
 
     prepared=[]
+    module_prepared=[]
     work=Path(tempfile.mkdtemp(prefix="no95-failclosed-"))
     try:
         for original,meta in entries.items():
@@ -67,7 +88,7 @@ def main():
                 )
 
             patch_rel=str(meta.get("patch") or "")
-            patch_path=repo/patch_rel
+            patch_path=repo_file(repo,patch_rel)
             if not patch_path.is_file():
                 raise RuntimeError(f"patch missing: {patch_rel}")
             patch_actual=sha256(patch_path)
@@ -93,9 +114,42 @@ def main():
                 )
             prepared.append((original,target,candidate,actual,patched))
 
+        bundle=((manifest.get("module_bundle") or {}).get(args.role) or {})
+        bundle_files=bundle.get("files") or {}
+        bundle_root_raw=str(bundle.get("destination_root") or "").strip()
+        if bundle_files and not bundle_root_raw:
+            raise RuntimeError("module bundle destination_root missing")
+        bundle_root=map_target(args.target_root,bundle_root_raw) if bundle_root_raw else None
+
+        for rel,meta in bundle_files.items():
+            src=repo_file(repo,rel)
+            if not src.is_file():
+                raise RuntimeError(f"module source missing: {rel}")
+            actual=sha256(src)
+            expected=str(meta.get("sha256") or "")
+            if actual!=expected:
+                raise RuntimeError(
+                    f"MODULE_SHA_MISMATCH {rel} expected={expected} actual={actual}"
+                )
+            if src.suffix==".py":
+                run([sys.executable,"-m","py_compile",str(src)])
+            mode=parse_mode(meta.get("mode","0644"))
+            dest=bundle_root/rel
+            module_prepared.append((rel,src,dest,actual,mode))
+
         print(f"VERIFY=PASS role={args.role} files={len(prepared)}")
         for original,_,_,before,after in prepared:
             print(f"FILE {original} before={before} after={after}")
+        if module_prepared:
+            print(
+                f"MODULE_BUNDLE=PASS role={args.role} files={len(module_prepared)} "
+                f"root={bundle_root_raw}"
+            )
+            for rel,_,dest,digest,mode in module_prepared:
+                print(
+                    f"MODULE {rel} dest=/{str(dest.relative_to(Path(args.target_root).resolve()))} "
+                    f"sha256={digest} mode={oct(mode)}"
+                )
 
         if not args.apply:
             print("MODE=DRY_RUN")
@@ -110,12 +164,42 @@ def main():
         os.chmod(backup,0o700)
 
         replaced=[]
+        module_replaced=[]
         try:
             for original,target,candidate,_,_ in prepared:
                 rel=original.lstrip("/").replace("/","__")
                 saved=backup/rel
                 shutil.copy2(target,saved)
                 os.chmod(saved,0o600)
+
+            for rel,src,dest,_,mode in module_prepared:
+                existed=dest.is_file()
+                saved=backup/("module__"+rel.replace("/","__"))
+                if existed:
+                    shutil.copy2(dest,saved)
+                    os.chmod(saved,0o600)
+
+                dest.parent.mkdir(parents=True,exist_ok=True)
+                if bundle_root is not None:
+                    bundle_root.mkdir(parents=True,exist_ok=True)
+                    os.chmod(bundle_root,0o755)
+                    current_dir=bundle_root
+                    for part in Path(rel).parent.parts:
+                        current_dir=current_dir/part
+                        current_dir.mkdir(exist_ok=True)
+                        os.chmod(current_dir,0o755)
+
+                tmp=dest.with_name("."+dest.name+".no95.tmp")
+                shutil.copy2(src,tmp)
+                os.chmod(tmp,mode)
+                if os.geteuid()==0:
+                    os.chown(tmp,0,0)
+                with open(tmp,"rb") as f:
+                    os.fsync(f.fileno())
+                os.replace(tmp,dest)
+                module_replaced.append((dest,existed,saved))
+                if sha256(dest)!=sha256(src):
+                    raise RuntimeError(f"post-install module hash mismatch: {rel}")
 
             for original,target,candidate,_,after in prepared:
                 tmp=target.with_name("."+target.name+".no95.tmp")
@@ -128,6 +212,8 @@ def main():
                     raise RuntimeError(f"post-replace hash mismatch: {original}")
 
             print(f"APPLY=PASS role={args.role} backup={backup}")
+            if module_prepared:
+                print(f"MODULE_INSTALL=PASS files={len(module_prepared)} root={bundle_root_raw}")
             print("RESTART_REQUIRED=YES")
             return 0
         except Exception:
@@ -135,6 +221,16 @@ def main():
                 saved=backup/(original.lstrip("/").replace("/","__"))
                 if saved.is_file():
                     shutil.copy2(saved,target)
+
+            for dest,existed,saved in reversed(module_replaced):
+                try:
+                    if existed and saved.is_file():
+                        shutil.copy2(saved,dest)
+                    elif not existed:
+                        dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
             print("ROLLBACK=APPLIED",file=sys.stderr)
             raise
     finally:
