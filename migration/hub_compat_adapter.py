@@ -97,7 +97,7 @@ class HubCompatAdapter:
         snap["received_at"] = int(time.time())
         self._atomic_json(self.legacy_state_path, {"version": 1, "snapshot": snap})
 
-    def enqueue(self, op, args):
+    def enqueue(self, op, args, mirror=True):
         now = int(time.time())
         cmd = {
             "id": uuid.uuid4().hex,
@@ -126,7 +126,8 @@ class HubCompatAdapter:
         commands.append(cmd)
         doc["commands"] = commands
         self._ensure_identity_records(doc)
-        self.mirror_legacy_state()
+        if mirror:
+            self.mirror_legacy_state()
 
         return {
             "success": True,
