@@ -60,6 +60,10 @@
         "migration/hub_telemetry_aggregator.py": {
           "sha256": "02b2d50965950e0d51455ef4872601bf836797bacd7582de878cd792bf4e566e",
           "mode": "0644"
+        },
+        "migration/seed_from_legacy_hub.py": {
+          "sha256": "ad75e3c06fc62f55eb1c8f9ff6ceb6dcb63a0a6d9b539ca42353c6bb34d0e69a",
+          "mode": "0755"
         }
       }
     }
