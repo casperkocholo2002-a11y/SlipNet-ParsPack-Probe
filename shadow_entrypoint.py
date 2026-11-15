@@ -234,15 +234,33 @@ def main():
     start("smart-egress", ["python3", str(APP / "smart_egress.py")])
     wait_port(19190)
 
+    relay_enabled = any(
+        env(name, "").strip()
+        for name in ("AUTHORITY_REMOTE_URL", "TELEMETRY_REMOTE_URL", "SESSION_REMOTE_URL")
+    )
+    if relay_enabled:
+        start("control-relay", ["python3", str(APP / "control_relay.py")])
+        wait_port(19184)
+
     start("ingress-xray", [XRAY, "run", "-config", ingress])
     wait_port(19443)
 
-    if env("AUTHORITY_URL", "").strip():
-        start("authority-sync", ["python3", str(APP / "authority_sync.py")])
+    authority_remote = env("AUTHORITY_REMOTE_URL", "").strip()
+    authority_url = env("AUTHORITY_URL", "").strip()
+    if authority_remote or authority_url:
+        authority_env = {}
+        if authority_remote:
+            authority_env["AUTHORITY_URL"] = "http://127.0.0.1:19184/authority"
+        start("authority-sync", ["python3", str(APP / "authority_sync.py")], authority_env)
         time.sleep(0.5)
 
-    if env("TELEMETRY_URL", "").strip():
-        start("telemetry-reporter", ["python3", str(APP / "telemetry_reporter.py")])
+    telemetry_remote = env("TELEMETRY_REMOTE_URL", "").strip()
+    telemetry_url = env("TELEMETRY_URL", "").strip()
+    if telemetry_remote or telemetry_url:
+        telemetry_env = {}
+        if telemetry_remote:
+            telemetry_env["TELEMETRY_URL"] = "http://127.0.0.1:19184/telemetry"
+        start("telemetry-reporter", ["python3", str(APP / "telemetry_reporter.py")], telemetry_env)
         time.sleep(0.5)
 
     node_env = {
@@ -250,6 +268,8 @@ def main():
         "LOCAL_VLESS_HOST": "127.0.0.1",
         "LOCAL_VLESS_PORT": "19443",
     }
+    if env("SESSION_REMOTE_URL", "").strip():
+        node_env["SESSION_TELEMETRY_URL"] = "http://127.0.0.1:19184/session"
     start("front", ["node", str(APP / "server.js")], node_env)
 
     print("NO95_SHADOW_READY", flush=True)
