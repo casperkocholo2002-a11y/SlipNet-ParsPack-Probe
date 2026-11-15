@@ -237,6 +237,10 @@ def main():
     start("ingress-xray", [XRAY, "run", "-config", ingress])
     wait_port(19443)
 
+    if env("AUTHORITY_URL", "").strip():
+        start("authority-sync", ["python3", str(APP / "authority_sync.py")])
+        time.sleep(0.5)
+
     node_env = {
         "LOCAL_VLESS_ORIGIN": "1",
         "LOCAL_VLESS_HOST": "127.0.0.1",
