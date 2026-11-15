@@ -16,6 +16,9 @@ function envValue(primary, fallback) {
 }
 
 const RELAY_PATH = envValue('RELAY_PATH', 'relaypath') || '/tunnel';
+const LOCAL_VLESS_ORIGIN = envValue('LOCAL_VLESS_ORIGIN', 'localvlessorigin') === '1';
+const LOCAL_VLESS_HOST = envValue('LOCAL_VLESS_HOST', 'localvlesshost') || '127.0.0.1';
+const LOCAL_VLESS_PORT = Number(envValue('LOCAL_VLESS_PORT', 'localvlessport') || 19443);
 const V2_SESSION_GUARD = createSessionGuard({
   route: 'arvan',
   telemetryUrl:
@@ -65,11 +68,13 @@ const server = http.createServer((req, res) => {
       ok: true,
       service: 'slipnet-parspack-ingress-probe',
       node: process.version,
-      relayConfigured: Boolean(
-        envValue('ORIGIN_HOST', 'originhost') &&
-        Number(envValue('ORIGIN_PORT', 'originport') || 0) &&
-        envValue('ORIGIN_SERVERNAME', 'originservername')
-      ),
+      relayConfigured: LOCAL_VLESS_ORIGIN
+        ? Boolean(LOCAL_VLESS_HOST && Number.isInteger(LOCAL_VLESS_PORT) && LOCAL_VLESS_PORT > 0 && LOCAL_VLESS_PORT <= 65535)
+        : Boolean(
+            envValue('ORIGIN_HOST', 'originhost') &&
+            Number(envValue('ORIGIN_PORT', 'originport') || 0) &&
+            envValue('ORIGIN_SERVERNAME', 'originservername')
+          ),
       directRelayConfigured: (() => {
         const d = directOriginConfig();
         return Boolean(d.host && Number.isInteger(d.port) && d.port > 0 && d.port <= 65535 && d.servername && d.path);
@@ -78,9 +83,10 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
+      primaryRelayMode: LOCAL_VLESS_ORIGIN ? 'local-vless' : 'tls-origin',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'graceful-drain-relay-v9-realip-guard',
+      build: 'no95-shadow-v1',
       now: new Date().toISOString(),
     });
   }
@@ -121,8 +127,8 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/origin-check') {
-    const targetHost = envValue('ORIGIN_HOST', 'originhost');
-    const targetPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
+    const targetHost = LOCAL_VLESS_ORIGIN ? LOCAL_VLESS_HOST : envValue('ORIGIN_HOST', 'originhost');
+    const targetPort = LOCAL_VLESS_ORIGIN ? LOCAL_VLESS_PORT : Number(envValue('ORIGIN_PORT', 'originport') || 0);
     if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
       return json(res, 503, { ok: false, error: 'origin_check_not_configured' });
     }
@@ -334,11 +340,14 @@ function handleEchoWebSocket(req, socket, head) {
 }
 
 function handlePrimaryRelayWebSocket(req, socket, head) {
-  const originHost = envValue('ORIGIN_HOST', 'originhost');
-  const originPort = Number(envValue('ORIGIN_PORT', 'originport') || 0);
+  const originHost = LOCAL_VLESS_ORIGIN ? LOCAL_VLESS_HOST : envValue('ORIGIN_HOST', 'originhost');
+  const originPort = LOCAL_VLESS_ORIGIN ? LOCAL_VLESS_PORT : Number(envValue('ORIGIN_PORT', 'originport') || 0);
   const originServername = envValue('ORIGIN_SERVERNAME', 'originservername');
 
-  if (!originHost || !originServername || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
+  if (!originHost || !Number.isInteger(originPort) || originPort < 1 || originPort > 65535) {
+    return rejectUpgrade(socket);
+  }
+  if (!LOCAL_VLESS_ORIGIN && !originServername) {
     return rejectUpgrade(socket);
   }
 
@@ -346,17 +355,19 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
   let clientStream = null;
   let closed = false;
 
-  const origin = tls.connect({
-    host: originHost,
-    port: originPort,
-    servername: undefined,
-    rejectUnauthorized: true,
-    checkServerIdentity: (_networkHost, cert) =>
-      tls.checkServerIdentity(originServername, cert),
-    minVersion: 'TLSv1.3',
-    ALPNProtocols: ['http/1.1'],
-    highWaterMark: 1024 * 1024,
-  });
+  const origin = LOCAL_VLESS_ORIGIN
+    ? net.createConnection({ host: originHost, port: originPort })
+    : tls.connect({
+        host: originHost,
+        port: originPort,
+        servername: undefined,
+        rejectUnauthorized: true,
+        checkServerIdentity: (_networkHost, cert) =>
+          tls.checkServerIdentity(originServername, cert),
+        minVersion: 'TLSv1.3',
+        ALPNProtocols: ['http/1.1'],
+        highWaterMark: 1024 * 1024,
+      });
   tuneSocket(origin);
 
   const closeAll = () => {
@@ -373,7 +384,8 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
     closeAll();
   });
 
-  origin.once('secureConnect', () => {
+  const readyEvent = LOCAL_VLESS_ORIGIN ? 'connect' : 'secureConnect';
+  origin.once(readyEvent, () => {
     origin.setTimeout(0);
 
     acceptWebSocket(req, socket, head, (ws) => {
