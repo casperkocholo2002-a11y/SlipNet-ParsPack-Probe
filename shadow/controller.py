@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, re, subprocess, tempfile, time, urllib.request
+import hashlib, json, os, re, subprocess, tempfile, time, urllib.request
 from pathlib import Path
 
 XRAY = os.environ.get("XRAY_BIN", "/usr/local/bin/xray")
@@ -10,7 +10,13 @@ MANIFEST_TOKEN = os.environ.get("MANIFEST_TOKEN", "").strip()
 MANIFEST_FILE = os.environ.get("MANIFEST_FILE", "").strip()
 CACHE = Path(os.environ.get("MANIFEST_CACHE", "/var/lib/slipnet-shadow/manifest.json"))
 APPLIED = Path(os.environ.get("APPLIED_STATE", "/var/lib/slipnet-shadow/applied.json"))
+PREFERENCE = Path(os.environ.get("SELECTOR_PREFERENCE", "/var/lib/slipnet-smart-egress/preference.json"))
+SELECTOR_STATE = Path(os.environ.get("SELECTOR_STATE", "/run/slipnet-smart-egress/state.json"))
 INTERVAL = float(os.environ.get("MANIFEST_INTERVAL", "5"))
+NODE_ID = os.environ.get("SHADOW_NODE_ID", "").strip().lower()
+USAGE_REPORT_URL = os.environ.get("USAGE_REPORT_URL", "").strip()
+USAGE_REPORT_TOKEN = os.environ.get("USAGE_REPORT_TOKEN", MANIFEST_TOKEN).strip()
+USAGE_REPORT_INTERVAL = float(os.environ.get("USAGE_REPORT_INTERVAL", "15"))
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 
 def atomic_json(path, obj):
@@ -32,19 +38,17 @@ def fetch_manifest():
         return data, "file"
     if MANIFEST_URL:
         headers = {"accept":"application/json"}
-        if MANIFEST_TOKEN:
-            headers["authorization"] = "Bearer " + MANIFEST_TOKEN
+        if MANIFEST_TOKEN: headers["authorization"] = "Bearer " + MANIFEST_TOKEN
         req = urllib.request.Request(MANIFEST_URL, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=3) as r:
-                data = json.load(r)
+            with urllib.request.urlopen(req, timeout=3) as r: data = json.load(r)
             atomic_json(CACHE, data)
             return data, "remote"
         except Exception:
             pass
     if CACHE.exists():
         return json.loads(CACHE.read_text(encoding="utf-8")), "cache"
-    return {"version":1,"users":[]}, "empty"
+    return {"version":1,"users":[],"route_preference":{"mode":"auto","preferred":None}}, "empty"
 
 def validate(data):
     if not isinstance(data, dict) or not isinstance(data.get("users"), list):
@@ -67,10 +71,10 @@ def validate(data):
     return clean
 
 def desired(rows):
-    now=int(time.time()); out={}
+    at=int(time.time()); out={}
     for u in rows:
         if not u["enabled"]: continue
-        if u["expires_at"] and now >= u["expires_at"]: continue
+        if u["expires_at"] and at >= u["expires_at"]: continue
         if u["quota_bytes"] and u["used_bytes"] >= u["quota_bytes"]: continue
         out[u["name"]] = u["uuid"]
     return out
@@ -104,23 +108,71 @@ def remove(name):
     rc,t=run([XRAY,"api","rmu","--server="+API,"-tag=shadow-vless","v2ray-"+name])
     if rc: raise RuntimeError("remove failed: "+t[-500:])
 
+def apply_preference(data):
+    pref=data.get("route_preference") or {}
+    mode=str(pref.get("mode") or "auto").lower()
+    route=str(pref.get("preferred") or "").lower()
+    if mode=="manual" and route in {"worker","arvan","parspack"}:
+        out={"mode":"manual","preferred":route,"updated_at":int(pref.get("updated_at") or time.time())}
+    else:
+        out={"mode":"auto","preferred":None,"updated_at":int(pref.get("updated_at") or time.time())}
+    atomic_json(PREFERENCE,out)
+
 def apply_once():
     data, source=fetch_manifest()
-    want=desired(validate(data))
-    cur=load_applied()
-    for name in sorted(set(cur)-set(want)):
-        remove(name)
+    rows=validate(data); want=desired(rows); cur=load_applied()
+    for name in sorted(set(cur)-set(want)): remove(name)
     for name,uid in want.items():
         if cur.get(name)!=uid:
             if name in cur: remove(name)
             add(name,uid)
     atomic_json(APPLIED,want)
+    apply_preference(data)
     print(json.dumps({"event":"manifest_applied","source":source,"users":len(want)},separators=(",",":")),flush=True)
+    return data
+
+def raw_stats():
+    rc,t=run([XRAY,"api","statsquery","--server="+API])
+    if rc: raise RuntimeError("statsquery failed: "+t[-300:])
+    d=json.loads(t.strip() or "{}")
+    return {str(x.get("name") or ""):int(x.get("value",0) or 0) for x in d.get("stat",[])}
+
+def selector_snapshot():
+    try:return json.loads(SELECTOR_STATE.read_text(encoding="utf-8"))
+    except Exception:return {}
+
+def report_usage(data):
+    if not USAGE_REPORT_URL or NODE_ID not in {"arvan","parspack"}: return
+    stats=raw_stats(); users=[]
+    for u in validate(data):
+        email="v2ray-"+u["name"]
+        up=int(stats.get(f"user>>>{email}>>>traffic>>>uplink",0) or 0)
+        down=int(stats.get(f"user>>>{email}>>>traffic>>>downlink",0) or 0)
+        users.append({
+          "name":u["name"],
+          "uuid_hash":hashlib.sha256(u["uuid"].encode()).hexdigest(),
+          "raw_bytes":up+down,
+        })
+    payload={"node":NODE_ID,"ts":int(time.time()),"users":users,"selector":selector_snapshot()}
+    body=json.dumps(payload,separators=(",",":")).encode()
+    headers={"content-type":"application/json"}
+    if USAGE_REPORT_TOKEN: headers["authorization"]="Bearer "+USAGE_REPORT_TOKEN
+    req=urllib.request.Request(USAGE_REPORT_URL,data=body,headers=headers,method="POST")
+    with urllib.request.urlopen(req,timeout=4) as r:
+        if r.status<200 or r.status>=300: raise RuntimeError("usage report rejected")
 
 if __name__=="__main__":
     once = "--once" in os.sys.argv
+    next_report=0.0; last_data=None
     while True:
-        try: apply_once()
-        except Exception as e: print(json.dumps({"event":"manifest_error","error":str(e)[:300]}),flush=True)
-        if once: break
+        try:last_data=apply_once()
+        except Exception as e:print(json.dumps({"event":"manifest_error","error":str(e)[:300]}),flush=True)
+        if last_data is not None and time.monotonic()>=next_report:
+            try:
+                report_usage(last_data)
+                if USAGE_REPORT_URL: print(json.dumps({"event":"usage_reported","node":NODE_ID}),flush=True)
+            except Exception as e:
+                print(json.dumps({"event":"usage_report_error","error":str(e)[:300]}),flush=True)
+            next_report=time.monotonic()+max(5.0,USAGE_REPORT_INTERVAL)
+        if once:break
         time.sleep(max(1.0,INTERVAL))
