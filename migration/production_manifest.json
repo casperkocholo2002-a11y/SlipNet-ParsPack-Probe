@@ -2,7 +2,7 @@
   "version": 1,
   "generated_for": "no95-fabric-migration",
   "branch": "shadow-no95-fabric-20261115",
-  "shadow_image": "ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:no95-shadow-3d18beb2559ba1b4abdabd5a591993b5e3d824f9",
+  "shadow_image": "ghcr.io/casperkocholo2002-a11y/slipnet-parspack-probe:no95-shadow-8ab80edf9371a5ebd381b77e003db0f24f016f45",
   "production_inputs": {
     "server155": {
       "/root/v2ray_hub.py": {
