@@ -132,7 +132,9 @@ def runtime_remove(item):
         item["email"],
     ])
     if rc != 0:
-        raise RuntimeError("runtime remove failed: " + text[-500:])
+        raise RuntimeError("runtime remove failed: " + text[-1000:])
+    if "Removed 1 user(s)" not in text and "Removed 0 user(s)" not in text:
+        raise RuntimeError("unexpected runtime remove result: " + text[-1000:])
 
 def apply_preference(snapshot):
     pref = snapshot.get("route_preference") or {}
