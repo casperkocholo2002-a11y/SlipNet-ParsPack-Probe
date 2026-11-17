@@ -36,7 +36,7 @@ jobs:
         run: |
           node --check server.js
           node --check session_guard.js
-          python3 -m py_compile smart_egress.py shadow_entrypoint.py
+          python3 -m py_compile smart_egress.py shadow_entrypoint.py authority_sync.py telemetry_reporter.py control_relay.py
 
       - uses: docker/login-action@v3
         with:
