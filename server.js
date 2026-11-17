@@ -28,11 +28,33 @@ const V2_SESSION_GUARD = createSessionGuard({
   requestTimeoutMs: 1800,
 });
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
+const WORKER_DIRECT_RELAY_PATH =
+  envValue('WORKER_DIRECT_RELAY_PATH', 'workerdirectrelaypath') ||
+  '/pw/6b7a4e1c9d8f2a35f4b20caa7e9d3f6c5a11b7c4';
+const WORKER_DIRECT_HOST =
+  envValue('WORKER_DIRECT_HOST', 'workerdirecthost') ||
+  'ppw-3c19aa324d48.edgecache-628bbe41dc.workers.dev';
+const WORKER_DIRECT_PATH =
+  envValue('WORKER_DIRECT_PATH', 'workerdirectpath') ||
+  '/w/986b32e37335922c2faab7ce2153a8c9f9c6aff9de334f28';
+const WORKER_FIXED_RELAY_PATH =
+  envValue('WORKER_FIXED_RELAY_PATH', 'workerfixedrelaypath') ||
+  '/pf/4e1b9c72a6d0f5e38b4c1a97d2f6e0ab3c8d5f11';
+const WORKER_FIXED_HOST =
+  envValue('WORKER_FIXED_HOST', 'workerfixedhost') ||
+  'ppf-56cf1bc939.edgecache-628bbe41dc.workers.dev';
+const WORKER_FIXED_PATH =
+  envValue('WORKER_FIXED_PATH', 'workerfixedpath') ||
+  '/ppwf/124b41395c04d8a24b794893309742a2f20b5482116d1e32';
+
+function normalizeDirectOrigin(value) {
+  return value === 'cdn.cspf.online' ? 'slipnet.wordpresscsp.ir' : value;
+}
 
 function directOriginConfig() {
-  const host = envValue('DIRECT_ORIGIN_HOST', 'directoriginhost');
+  const host = normalizeDirectOrigin(envValue('DIRECT_ORIGIN_HOST', 'directoriginhost'));
   const port = Number(envValue('DIRECT_ORIGIN_PORT', 'directoriginport') || 0);
-  const servername = envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername');
+  const servername = normalizeDirectOrigin(envValue('DIRECT_ORIGIN_SERVERNAME', 'directoriginservername'));
   const path = envValue('DIRECT_ORIGIN_PATH', 'directoriginpath');
   return { host, port, servername, path };
 }
@@ -83,10 +105,13 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
+      workerDirectConfigured: Boolean(WORKER_DIRECT_HOST && WORKER_DIRECT_PATH),
+      workerFixedConfigured: Boolean(WORKER_FIXED_HOST && WORKER_FIXED_PATH),
+      workerRelayMode: 'wss',
       primaryRelayMode: LOCAL_VLESS_ORIGIN ? 'local-vless' : 'tls-origin',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'no95-shadow-v1',
+      build: 'no95-shadow-v2-parspack-compat',
       now: new Date().toISOString(),
     });
   }
@@ -470,6 +495,62 @@ function handleDirectRelayWebSocket(req, socket, head) {
   socket.once('close', () => { if (!client) closeAll(); });
 }
 
+function workerRelayUrl(host, path) {
+  return new URL(path, 'wss://' + host).toString();
+}
+
+function handleWorkerRelayWebSocket(req, socket, head, host, path) {
+  if (!host || !path) {
+    return rejectUpgrade(socket);
+  }
+
+  let client = null;
+  let clientStream = null;
+  let backendStream = null;
+  let closed = false;
+
+  const backend = new WebSocket(workerRelayUrl(host, path), {
+    perMessageDeflate: false,
+    handshakeTimeout: 15000,
+    maxPayload: MAX_WS,
+  });
+
+  const closeAll = () => {
+    if (closed) return;
+    closed = true;
+    try { clientStream && clientStream.destroy(); } catch {}
+    try { backendStream && backendStream.destroy(); } catch {}
+    try { client && client.terminate(); } catch {}
+    try { backend.terminate(); } catch {}
+    try { if (!client) socket.destroy(); } catch {}
+  };
+
+  backend.once('open', () => {
+    try { tuneSocket(backend._socket); } catch {}
+
+    acceptWebSocket(req, socket, head, (ws) => {
+      client = ws;
+      clientStream = createWebSocketStream(ws, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+      backendStream = createWebSocketStream(backend, {
+        encoding: null,
+        highWaterMark: 1024 * 1024,
+      });
+
+      bridgeStreams(clientStream, backendStream, closeAll);
+    });
+  });
+
+  backend.once('error', () => {
+    if (!client) rejectUpgrade(socket, '502 Bad Gateway');
+    closeAll();
+  });
+  socket.once('error', closeAll);
+  socket.once('close', () => { if (!client) closeAll(); });
+}
+
 server.on('upgrade', (req, socket, head) => {
   let url;
   try {
@@ -481,6 +562,12 @@ server.on('upgrade', (req, socket, head) => {
   if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
   if (url.pathname === RELAY_PATH) return handlePrimaryRelayWebSocket(req, socket, head);
   if (url.pathname === DIRECT_RELAY_PATH) return handleDirectRelayWebSocket(req, socket, head);
+  if (url.pathname === WORKER_DIRECT_RELAY_PATH) {
+    return handleWorkerRelayWebSocket(req, socket, head, WORKER_DIRECT_HOST, WORKER_DIRECT_PATH);
+  }
+  if (url.pathname === WORKER_FIXED_RELAY_PATH) {
+    return handleWorkerRelayWebSocket(req, socket, head, WORKER_FIXED_HOST, WORKER_FIXED_PATH);
+  }
   return socket.destroy();
 });
 
