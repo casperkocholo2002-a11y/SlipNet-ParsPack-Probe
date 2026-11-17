@@ -28,6 +28,11 @@ const V2_SESSION_GUARD = createSessionGuard({
   requestTimeoutMs: 1800,
 });
 const DIRECT_RELAY_PATH = envValue('DIRECT_RELAY_PATH', 'directrelaypath') || '/direct';
+const WORKER_COMPAT_ENABLED = (() => {
+  const explicit = envValue('WORKER_COMPAT_ENABLED', 'workercompatenabled');
+  if (explicit) return explicit === '1';
+  return V2_SESSION_GUARD.route === 'parspack';
+})();
 const WORKER_DIRECT_RELAY_PATH =
   envValue('WORKER_DIRECT_RELAY_PATH', 'workerdirectrelaypath') ||
   '/pw/6b7a4e1c9d8f2a35f4b20caa7e9d3f6c5a11b7c4';
@@ -105,8 +110,8 @@ const server = http.createServer((req, res) => {
       directOriginSniSent: true,
       originTlsMin: 'TLSv1.3',
       directRelayMode: 'wss',
-      workerDirectConfigured: Boolean(WORKER_DIRECT_HOST && WORKER_DIRECT_PATH),
-      workerFixedConfigured: Boolean(WORKER_FIXED_HOST && WORKER_FIXED_PATH),
+      workerDirectConfigured: Boolean(WORKER_COMPAT_ENABLED && WORKER_DIRECT_HOST && WORKER_DIRECT_PATH),
+      workerFixedConfigured: Boolean(WORKER_COMPAT_ENABLED && WORKER_FIXED_HOST && WORKER_FIXED_PATH),
       workerRelayMode: 'wss',
       primaryRelayMode: LOCAL_VLESS_ORIGIN ? 'local-vless' : 'tls-origin',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
@@ -562,10 +567,10 @@ server.on('upgrade', (req, socket, head) => {
   if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
   if (url.pathname === RELAY_PATH) return handlePrimaryRelayWebSocket(req, socket, head);
   if (url.pathname === DIRECT_RELAY_PATH) return handleDirectRelayWebSocket(req, socket, head);
-  if (url.pathname === WORKER_DIRECT_RELAY_PATH) {
+  if (WORKER_COMPAT_ENABLED && url.pathname === WORKER_DIRECT_RELAY_PATH) {
     return handleWorkerRelayWebSocket(req, socket, head, WORKER_DIRECT_HOST, WORKER_DIRECT_PATH);
   }
-  if (url.pathname === WORKER_FIXED_RELAY_PATH) {
+  if (WORKER_COMPAT_ENABLED && url.pathname === WORKER_FIXED_RELAY_PATH) {
     return handleWorkerRelayWebSocket(req, socket, head, WORKER_FIXED_HOST, WORKER_FIXED_PATH);
   }
   return socket.destroy();
