@@ -190,6 +190,22 @@ def wait_port(port, timeout=15):
         time.sleep(0.15)
     raise RuntimeError(f"local port {port} did not become ready")
 
+def wait_authority_ready(process, timeout=12):
+    ready = ROOT / "authority-applied.json"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rc = process.poll()
+        if rc is not None:
+            raise RuntimeError(f"authority sync exited before readiness rc={rc}")
+        try:
+            payload = json.loads(ready.read_text())
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        time.sleep(0.1)
+    raise RuntimeError("authority startup readiness timeout")
+
 def stop_all():
     global stopping
     if stopping:
@@ -251,8 +267,13 @@ def main():
         authority_env = {}
         if authority_remote:
             authority_env["AUTHORITY_URL"] = "http://127.0.0.1:19184/authority"
-        start("authority-sync", ["python3", str(APP / "authority_sync.py")], authority_env)
-        time.sleep(0.5)
+        authority_process = start(
+            "authority-sync",
+            ["python3", str(APP / "authority_sync.py")],
+            authority_env,
+        )
+        authority_timeout = max(2, int(env("AUTHORITY_STARTUP_TIMEOUT_S", "12")))
+        wait_authority_ready(authority_process, timeout=authority_timeout)
 
     telemetry_remote = env("TELEMETRY_REMOTE_URL", "").strip()
     telemetry_url = env("TELEMETRY_URL", "").strip()
