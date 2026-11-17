@@ -169,6 +169,7 @@ def reconcile(snapshot):
         save_applied(current)
 
     apply_preference(snapshot)
+    save_applied(current)
     return len(current)
 
 def main():
