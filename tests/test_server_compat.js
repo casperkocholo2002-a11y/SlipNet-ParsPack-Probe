@@ -45,6 +45,8 @@ async function main() {
   });
 
   let health = null;
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
   try {
     for (let i = 0; i < 40; i += 1) {
       try {
@@ -54,7 +56,7 @@ async function main() {
         await new Promise((r) => setTimeout(r, 100));
       }
     }
-    assert(health, 'server did not become healthy');
+    assert(health, 'server did not become healthy: ' + stderr.slice(-1200));
     assert.strictEqual(health.status, 200);
     assert.strictEqual(health.body.ok, true);
     assert.strictEqual(health.body.build, 'no95-shadow-v2-parspack-compat');
