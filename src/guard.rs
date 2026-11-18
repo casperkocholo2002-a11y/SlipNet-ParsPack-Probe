@@ -16,6 +16,7 @@ use crate::config::env_value;
 const DEFAULT_TELEMETRY_URL: &str = "https://monitor.reoos.ir/api/v2ray-session/telemetry";
 const FALLBACK_TELEMETRY_URL: &str = "https://monitor.cspf.shop/api/v2ray-session/telemetry";
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelemetryResponse {
     #[serde(default)]
@@ -55,7 +56,10 @@ impl SessionGuard {
         if telemetry_url.is_empty() {
             telemetry_url = DEFAULT_TELEMETRY_URL.into();
         }
-        let telemetry_fallback = if telemetry_url.trim().eq_ignore_ascii_case(FALLBACK_TELEMETRY_URL) {
+        let telemetry_fallback = if telemetry_url
+            .trim()
+            .eq_ignore_ascii_case(FALLBACK_TELEMETRY_URL)
+        {
             String::new()
         } else {
             FALLBACK_TELEMETRY_URL.into()
@@ -88,7 +92,8 @@ impl SessionGuard {
         if ip.is_empty() {
             return Ok(None);
         }
-        let uuid = uuid_from_header(initial).ok_or_else(|| anyhow::anyhow!("invalid_vless_uuid"))?;
+        let uuid =
+            uuid_from_header(initial).ok_or_else(|| anyhow::anyhow!("invalid_vless_uuid"))?;
         let hash = uuid_hash(&uuid);
         let mut random = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut random);
@@ -312,7 +317,10 @@ mod tests {
     fn pars_pack_prefers_x_real_ip() {
         let mut h = HeaderMap::new();
         h.insert("x-real-ip", HeaderValue::from_static("5.215.242.49"));
-        h.insert("x-forwarded-for", HeaderValue::from_static("8.8.8.8, 5.215.242.49, 192.168.4.104"));
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("8.8.8.8, 5.215.242.49, 192.168.4.104"),
+        );
         assert_eq!(source_ip(&h, peer(), "parspack"), "5.215.242.49");
     }
 
@@ -320,7 +328,10 @@ mod tests {
     fn rejects_spoofed_leftmost_xff() {
         let mut h = HeaderMap::new();
         h.insert("x-real-ip", HeaderValue::from_static("192.168.4.104"));
-        h.insert("x-forwarded-for", HeaderValue::from_static("8.8.8.8, 5.215.242.49, 192.168.4.104"));
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("8.8.8.8, 5.215.242.49, 192.168.4.104"),
+        );
         assert_eq!(source_ip(&h, peer(), "parspack"), "5.215.242.49");
     }
 
@@ -328,8 +339,8 @@ mod tests {
     fn parses_vless_uuid_from_first_17_bytes() {
         let mut bytes = vec![0u8; 17];
         bytes[1..17].copy_from_slice(&[
-            0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef,
-            0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef,
+            0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+            0xcd, 0xef,
         ]);
         assert_eq!(
             uuid_from_header(&bytes).unwrap(),

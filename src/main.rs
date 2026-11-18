@@ -105,7 +105,12 @@ async fn origin_check() -> Response {
     };
 
     let start = std::time::Instant::now();
-    let mut tcp = match tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect((&*host, port))).await {
+    let mut tcp = match tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect((&*host, port)),
+    )
+    .await
+    {
         Ok(Ok(tcp)) => tcp,
         _ => {
             return json_response(
@@ -205,7 +210,10 @@ async fn stream_http(Query(q): Query<StreamQuery>) -> Response {
 
     let mut response = Body::from_stream(body_stream).into_response();
     let headers = response.headers_mut();
-    headers.insert("content-type", HeaderValue::from_static("application/octet-stream"));
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("application/octet-stream"),
+    );
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
     headers.insert("x-slipnet-probe", HeaderValue::from_static("1"));
     headers.insert(
@@ -248,7 +256,10 @@ async fn echo_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> Respons
             let _permit = SessionPermit::new(state.sessions.clone());
             while let Some(Ok(message)) = socket.recv().await {
                 match message {
-                    AMessage::Text(_) | AMessage::Binary(_) | AMessage::Ping(_) | AMessage::Pong(_) => {
+                    AMessage::Text(_)
+                    | AMessage::Binary(_)
+                    | AMessage::Ping(_)
+                    | AMessage::Pong(_) => {
                         if socket.send(message).await.is_err() {
                             break;
                         }
@@ -260,7 +271,7 @@ async fn echo_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> Respons
 }
 
 async fn read_initial_payload(socket: &mut WebSocket, needed: usize) -> Result<Vec<u8>> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    Ok(tokio::time::timeout(Duration::from_secs(5), async {
         let mut out = Vec::with_capacity(needed);
         while out.len() < needed {
             let message = socket
@@ -280,7 +291,7 @@ async fn read_initial_payload(socket: &mut WebSocket, needed: usize) -> Result<V
         }
         Ok::<Vec<u8>, anyhow::Error>(out)
     })
-    .await??
+    .await??)
 }
 
 async fn primary_relay(
@@ -294,11 +305,12 @@ async fn primary_relay(
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
 
-    ws.max_message_size(MAX_WS).on_upgrade(move |socket| async move {
-        if let Err(error) = primary_session(socket, origin, headers, peer, state).await {
-            eprintln!("primary session ended: {error:#}");
-        }
-    })
+    ws.max_message_size(MAX_WS)
+        .on_upgrade(move |socket| async move {
+            if let Err(error) = primary_session(socket, origin, headers, peer, state).await {
+                eprintln!("primary session ended: {error:#}");
+            }
+        })
 }
 
 async fn primary_session(
@@ -393,10 +405,7 @@ async fn primary_session(
     Ok(())
 }
 
-async fn direct_relay(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn direct_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     let config = direct_config();
     if !config.valid() {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -405,39 +414,31 @@ async fn direct_relay(
         Ok(backend) => backend,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
-    ws.max_message_size(MAX_WS).on_upgrade(move |socket| async move {
-        let _ = proxy_backend_session(socket, backend, state).await;
-    })
+    ws.max_message_size(MAX_WS)
+        .on_upgrade(move |socket| async move {
+            let _ = proxy_backend_session(socket, backend, state).await;
+        })
 }
 
-async fn worker_direct_relay(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn worker_direct_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     let url = worker_url(&worker_direct_host(), &worker_direct_path());
     backend_relay_response(ws, state, &url).await
 }
 
-async fn worker_fixed_relay(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn worker_fixed_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     let url = worker_url(&worker_fixed_host(), &worker_fixed_path());
     backend_relay_response(ws, state, &url).await
 }
 
-async fn backend_relay_response(
-    ws: WebSocketUpgrade,
-    state: AppState,
-    url: &str,
-) -> Response {
+async fn backend_relay_response(ws: WebSocketUpgrade, state: AppState, url: &str) -> Response {
     let backend = match tls::dial_url_ws(url).await {
         Ok(backend) => backend,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
-    ws.max_message_size(MAX_WS).on_upgrade(move |socket| async move {
-        let _ = proxy_backend_session(socket, backend, state).await;
-    })
+    ws.max_message_size(MAX_WS)
+        .on_upgrade(move |socket| async move {
+            let _ = proxy_backend_session(socket, backend, state).await;
+        })
 }
 
 async fn proxy_backend_session(
@@ -453,7 +454,11 @@ async fn proxy_backend_session(
         while let Some(message) = client_rx.next().await {
             match message? {
                 AMessage::Binary(data) => backend_tx.send(TMessage::Binary(data)).await?,
-                AMessage::Text(text) => backend_tx.send(TMessage::Text(text.to_string().into())).await?,
+                AMessage::Text(text) => {
+                    backend_tx
+                        .send(TMessage::Text(text.to_string().into()))
+                        .await?
+                }
                 AMessage::Ping(data) => backend_tx.send(TMessage::Ping(data)).await?,
                 AMessage::Pong(data) => backend_tx.send(TMessage::Pong(data)).await?,
                 AMessage::Close(_) => {
@@ -469,7 +474,11 @@ async fn proxy_backend_session(
         while let Some(message) = backend_rx.next().await {
             match message? {
                 TMessage::Binary(data) => client_tx.send(AMessage::Binary(data)).await?,
-                TMessage::Text(text) => client_tx.send(AMessage::Text(text.to_string().into())).await?,
+                TMessage::Text(text) => {
+                    client_tx
+                        .send(AMessage::Text(text.to_string().into()))
+                        .await?
+                }
                 TMessage::Ping(data) => client_tx.send(AMessage::Ping(data)).await?,
                 TMessage::Pong(data) => client_tx.send(AMessage::Pong(data)).await?,
                 TMessage::Close(_) => {
@@ -523,7 +532,11 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> Result<()> {
     let port = env_int("PORT", "");
-    let port = if (1..=65535).contains(&port) { port as u16 } else { 8080 };
+    let port = if (1..=65535).contains(&port) {
+        port as u16
+    } else {
+        8080
+    };
 
     let state = AppState {
         guard: Arc::new(SessionGuard::new("parspack")),

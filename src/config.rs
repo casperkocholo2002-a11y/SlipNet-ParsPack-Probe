@@ -25,12 +25,20 @@ pub fn env_int(primary: &str, fallback: &str) -> i64 {
 
 pub fn relay_path() -> String {
     let value = env_value("RELAY_PATH", "relaypath");
-    if value.is_empty() { "/tunnel".into() } else { value }
+    if value.is_empty() {
+        "/tunnel".into()
+    } else {
+        value
+    }
 }
 
 pub fn direct_relay_path() -> String {
     let value = env_value("DIRECT_RELAY_PATH", "directrelaypath");
-    if value.is_empty() { "/direct".into() } else { value }
+    if value.is_empty() {
+        "/direct".into()
+    } else {
+        value
+    }
 }
 
 pub fn worker_direct_relay_path() -> String {
@@ -99,14 +107,20 @@ pub fn direct_config() -> DirectConfig {
     DirectConfig {
         host: normalize_direct_origin(env_value("DIRECT_ORIGIN_HOST", "directoriginhost")),
         port: env_int("DIRECT_ORIGIN_PORT", "directoriginport").clamp(0, 65535) as u16,
-        servername: normalize_direct_origin(env_value("DIRECT_ORIGIN_SERVERNAME", "directoriginservername")),
+        servername: normalize_direct_origin(env_value(
+            "DIRECT_ORIGIN_SERVERNAME",
+            "directoriginservername",
+        )),
         path: env_value("DIRECT_ORIGIN_PATH", "directoriginpath"),
     }
 }
 
 impl DirectConfig {
     pub fn valid(&self) -> bool {
-        !self.host.is_empty() && !self.servername.is_empty() && !self.path.is_empty() && self.port > 0
+        !self.host.is_empty()
+            && !self.servername.is_empty()
+            && !self.path.is_empty()
+            && self.port > 0
     }
 
     pub fn websocket_url(&self) -> String {

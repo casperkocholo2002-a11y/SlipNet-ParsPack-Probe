@@ -5,8 +5,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::{client::TlsStream, TlsConnector};
 use tokio_tungstenite::{
-    client_async_tls_with_config,
-    connect_async,
+    client_async_tls_with_config, connect_async,
     tungstenite::{client::IntoClientRequest, Message},
     Connector, MaybeTlsStream, WebSocketStream,
 };
@@ -40,14 +39,12 @@ async fn tcp_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStre
 pub async fn dial_primary_origin() -> Result<TlsStream<TcpStream>> {
     let (host, port, servername) = origin_config().context("origin_not_configured")?;
     let tcp = tcp_connect(&host, port, Duration::from_secs(15)).await?;
-    let server_name = ServerName::try_from(servername.clone()).context("invalid origin servername")?;
+    let server_name =
+        ServerName::try_from(servername.clone()).context("invalid origin servername")?;
     let connector = TlsConnector::from(Arc::new(tls_config(false)));
-    let tls = tokio::time::timeout(
-        Duration::from_secs(15),
-        connector.connect(server_name, tcp),
-    )
-    .await
-    .context("tls handshake timeout")??;
+    let tls = tokio::time::timeout(Duration::from_secs(15), connector.connect(server_name, tcp))
+        .await
+        .context("tls handshake timeout")??;
     Ok(tls)
 }
 
