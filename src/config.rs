@@ -23,31 +23,35 @@ pub fn env_int(primary: &str, fallback: &str) -> i64 {
     env_value(primary, fallback).parse::<i64>().unwrap_or(0)
 }
 
-pub fn relay_path() -> String {
-    let value = env_value("RELAY_PATH", "relaypath");
-    if value.is_empty() {
-        "/tunnel".into()
+fn normalize_route_path(value: String, default: &str) -> String {
+    let owned;
+    let raw = if value.trim().is_empty() {
+        default
     } else {
-        value
+        owned = value.trim().to_owned();
+        &owned
+    };
+    let trimmed = raw.trim_matches('/');
+    if trimmed.is_empty() {
+        "/".into()
+    } else {
+        format!("/{trimmed}")
     }
+}
+
+pub fn relay_path() -> String {
+    normalize_route_path(env_value("RELAY_PATH", "relaypath"), "/tunnel")
 }
 
 pub fn direct_relay_path() -> String {
-    let value = env_value("DIRECT_RELAY_PATH", "directrelaypath");
-    if value.is_empty() {
-        "/direct".into()
-    } else {
-        value
-    }
+    normalize_route_path(env_value("DIRECT_RELAY_PATH", "directrelaypath"), "/direct")
 }
 
 pub fn worker_direct_relay_path() -> String {
-    let value = env_value("WORKER_DIRECT_RELAY_PATH", "workerdirectrelaypath");
-    if value.is_empty() {
-        "/pw/6b7a4e1c9d8f2a35f4b20caa7e9d3f6c5a11b7c4".into()
-    } else {
-        value
-    }
+    normalize_route_path(
+        env_value("WORKER_DIRECT_RELAY_PATH", "workerdirectrelaypath"),
+        "/pw/6b7a4e1c9d8f2a35f4b20caa7e9d3f6c5a11b7c4",
+    )
 }
 
 pub fn worker_direct_host() -> String {
@@ -69,12 +73,10 @@ pub fn worker_direct_path() -> String {
 }
 
 pub fn worker_fixed_relay_path() -> String {
-    let value = env_value("WORKER_FIXED_RELAY_PATH", "workerfixedrelaypath");
-    if value.is_empty() {
-        "/pf/4e1b9c72a6d0f5e38b4c1a97d2f6e0ab3c8d5f11".into()
-    } else {
-        value
-    }
+    normalize_route_path(
+        env_value("WORKER_FIXED_RELAY_PATH", "workerfixedrelaypath"),
+        "/pf/4e1b9c72a6d0f5e38b4c1a97d2f6e0ab3c8d5f11",
+    )
 }
 
 pub fn worker_fixed_host() -> String {
