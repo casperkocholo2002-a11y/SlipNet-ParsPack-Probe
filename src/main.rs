@@ -39,7 +39,7 @@ use tls::BackendWs;
 const MAX_ECHO: usize = 16 * 1024 * 1024;
 const MAX_STREAM: usize = 8 * 1024 * 1024;
 const MAX_WS: usize = 1024 * 1024;
-const BUILD_ID: &str = "rust-native-v3-go-direct-parity";
+const BUILD_ID: &str = "rust-native-v4-direct-diagnostic";
 
 #[derive(Clone)]
 struct AppState {
@@ -160,10 +160,13 @@ async fn direct_origin_check() -> Response {
                 json!({"ok": true, "connected": true, "mode": "wss", "ms": start.elapsed().as_millis()}),
             )
         }
-        Err(_) => json_response(
-            StatusCode::BAD_GATEWAY,
-            json!({"ok": false, "connected": false, "error": "wss_connect_error", "ms": start.elapsed().as_millis()}),
-        ),
+        Err(err) => {
+            let kind = tls::classify_direct_error(&err);
+            json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({"ok": false, "connected": false, "error": "wss_connect_error", "kind": kind, "ms": start.elapsed().as_millis()}),
+            )
+        }
     }
 }
 
