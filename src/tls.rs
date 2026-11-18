@@ -4,11 +4,7 @@ use rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
 use std::{sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::{client::TlsStream, TlsConnector};
-use tokio_tungstenite::{
-    client_async_tls_with_config, connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
-    Connector, MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::config::{origin_config, DirectConfig};
 
@@ -22,14 +18,6 @@ fn root_store() -> RootCertStore {
 
 fn tls13_config(send_sni: bool) -> ClientConfig {
     let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_root_certificates(root_store())
-        .with_no_client_auth();
-    config.enable_sni = send_sni;
-    config
-}
-
-fn default_tls_config(send_sni: bool) -> ClientConfig {
-    let mut config = ClientConfig::builder()
         .with_root_certificates(root_store())
         .with_no_client_auth();
     config.enable_sni = send_sni;
@@ -61,18 +49,10 @@ pub async fn dial_direct_ws(config: &DirectConfig) -> Result<BackendWs> {
         anyhow::bail!("direct_not_configured");
     }
 
-    let tcp = tcp_connect(&config.host, config.port, Duration::from_secs(5)).await?;
-    let request = config
-        .websocket_url()
-        .into_client_request()
-        .context("direct websocket request")?;
-    let connector = Connector::Rustls(Arc::new(default_tls_config(true)));
-    let (ws, _) = tokio::time::timeout(
-        Duration::from_secs(5),
-        client_async_tls_with_config(request, tcp, None, Some(connector)),
-    )
-    .await
-    .context("direct websocket timeout")??;
+    let target = config.websocket_url();
+    let (ws, _) = tokio::time::timeout(Duration::from_secs(5), connect_async(&target))
+        .await
+        .context("direct websocket timeout")??;
     Ok(ws)
 }
 

@@ -39,7 +39,7 @@ use tls::BackendWs;
 const MAX_ECHO: usize = 16 * 1024 * 1024;
 const MAX_STREAM: usize = 8 * 1024 * 1024;
 const MAX_WS: usize = 1024 * 1024;
-const BUILD_ID: &str = "rust-native-v2-direct-tls";
+const BUILD_ID: &str = "rust-native-v3-go-direct-parity";
 
 #[derive(Clone)]
 struct AppState {
