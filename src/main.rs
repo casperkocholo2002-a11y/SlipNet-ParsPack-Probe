@@ -360,9 +360,7 @@ async fn primary_session(
             if n == 0 {
                 break;
             }
-            ws_tx
-                .send(AMessage::Binary(Bytes::copy_from_slice(&buf[..n])))
-                .await?;
+            ws_tx.send(AMessage::Binary(buf[..n].to_vec())).await?;
         }
         Ok::<(), anyhow::Error>(())
     };
