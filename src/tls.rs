@@ -20,8 +20,16 @@ fn root_store() -> RootCertStore {
     roots
 }
 
-fn tls_config(send_sni: bool) -> ClientConfig {
+fn tls13_config(send_sni: bool) -> ClientConfig {
     let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_root_certificates(root_store())
+        .with_no_client_auth();
+    config.enable_sni = send_sni;
+    config
+}
+
+fn default_tls_config(send_sni: bool) -> ClientConfig {
+    let mut config = ClientConfig::builder()
         .with_root_certificates(root_store())
         .with_no_client_auth();
     config.enable_sni = send_sni;
@@ -41,7 +49,7 @@ pub async fn dial_primary_origin() -> Result<TlsStream<TcpStream>> {
     let tcp = tcp_connect(&host, port, Duration::from_secs(15)).await?;
     let server_name =
         ServerName::try_from(servername.clone()).context("invalid origin servername")?;
-    let connector = TlsConnector::from(Arc::new(tls_config(false)));
+    let connector = TlsConnector::from(Arc::new(tls13_config(false)));
     let tls = tokio::time::timeout(Duration::from_secs(15), connector.connect(server_name, tcp))
         .await
         .context("tls handshake timeout")??;
@@ -58,7 +66,7 @@ pub async fn dial_direct_ws(config: &DirectConfig) -> Result<BackendWs> {
         .websocket_url()
         .into_client_request()
         .context("direct websocket request")?;
-    let connector = Connector::Rustls(Arc::new(tls_config(true)));
+    let connector = Connector::Rustls(Arc::new(default_tls_config(true)));
     let (ws, _) = tokio::time::timeout(
         Duration::from_secs(5),
         client_async_tls_with_config(request, tcp, None, Some(connector)),
