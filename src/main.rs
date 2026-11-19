@@ -25,7 +25,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, TcpListener, TcpStream},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex, Semaphore},
 };
 
 const BUILD_ID: &str = "frankfurt-standalone-failover-v1";
@@ -475,11 +475,18 @@ fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || ip.is_multicast()
         }
         IpAddr::V6(ip) => {
+            let octets = ip.octets();
+            let unique_local = (octets[0] & 0xfe) == 0xfc;
+            let link_local = octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80;
+            let documentation =
+                octets[0] == 0x20 && octets[1] == 0x01 && octets[2] == 0x0d && octets[3] == 0xb8;
+
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_multicast()
-                || ip.is_unique_local()
-                || ip.is_unicast_link_local()
+                || unique_local
+                || link_local
+                || documentation
         }
     }
 }
