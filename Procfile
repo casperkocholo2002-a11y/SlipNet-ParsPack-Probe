@@ -1,1 +1,1 @@
-web: target/release/slipnet-parspack-rust
+web: target/release/slipnet-frankfurt-failover
