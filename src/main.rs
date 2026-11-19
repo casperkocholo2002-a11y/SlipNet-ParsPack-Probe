@@ -39,7 +39,7 @@ use tls::BackendWs;
 const MAX_ECHO: usize = 16 * 1024 * 1024;
 const MAX_STREAM: usize = 8 * 1024 * 1024;
 const MAX_WS: usize = 1024 * 1024;
-const BUILD_ID: &str = "rust-native-v7-canonical-dns-diagnostic";
+const BUILD_ID: &str = "rust-native-v8-parity-final";
 
 #[derive(Clone)]
 struct AppState {
@@ -140,69 +140,6 @@ async fn origin_check() -> Response {
     json_response(
         StatusCode::OK,
         json!({"ok": true, "connected": true, "ms": start.elapsed().as_millis(), "banner": banner}),
-    )
-}
-
-fn short_fingerprint(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    hex::encode(hasher.finalize())[..12].to_owned()
-}
-
-async fn resolve_summary(host: &str, port: u16) -> serde_json::Value {
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::net::lookup_host((host, port)),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(addrs)) => {
-            let mut count = 0usize;
-            let mut v4 = false;
-            let mut v6 = false;
-            for addr in addrs {
-                count += 1;
-                if addr.is_ipv4() {
-                    v4 = true;
-                } else if addr.is_ipv6() {
-                    v6 = true;
-                }
-            }
-            json!({"ok": count > 0, "count": count, "v4": v4, "v6": v6})
-        }
-        Ok(Err(_)) => json!({"ok": false, "error": "resolve_error"}),
-        Err(_) => json!({"ok": false, "error": "resolve_timeout"}),
-    }
-}
-
-async fn direct_dns_check() -> Response {
-    let config = direct_config();
-    if !config.valid() {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"ok": false, "error": "direct_dns_check_not_configured"}),
-        );
-    }
-
-    const CANONICAL: &str = "slipnet.wordpresscsp.ir";
-    let host = resolve_summary(&config.host, config.port).await;
-    let servername = resolve_summary(&config.servername, config.port).await;
-    let canonical = resolve_summary(CANONICAL, config.port).await;
-
-    json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "hostEqualsServername": config.host == config.servername,
-            "hostFingerprint": short_fingerprint(&config.host),
-            "servernameFingerprint": short_fingerprint(&config.servername),
-            "hostCanonical": config.host == CANONICAL,
-            "servernameCanonical": config.servername == CANONICAL,
-            "hostResolve": host,
-            "servernameResolve": servername,
-            "canonicalResolve": canonical,
-        }),
     )
 }
 
@@ -616,7 +553,6 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/origin-check", get(origin_check))
         .route("/direct-origin-check", get(direct_origin_check))
-        .route("/direct-dns-check", get(direct_dns_check))
         .route("/echo", post(echo))
         .route("/stream", get(stream_http))
         .route("/hold", get(hold_http))
