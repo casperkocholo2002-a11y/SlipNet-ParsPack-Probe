@@ -63,6 +63,55 @@ pub async fn dial_url_ws(url: &str) -> Result<BackendWs> {
     Ok(ws)
 }
 
+fn classify_io_error(io: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+
+    match io.kind() {
+        ErrorKind::ConnectionRefused => return "connection_refused",
+        ErrorKind::ConnectionReset => return "connection_reset",
+        ErrorKind::ConnectionAborted => return "connection_aborted",
+        ErrorKind::TimedOut => return "io_timeout",
+        ErrorKind::NotFound => return "dns_or_not_found",
+        ErrorKind::InvalidData => return "io_invalid_data",
+        ErrorKind::UnexpectedEof => return "unexpected_eof",
+        ErrorKind::AddrNotAvailable => return "addr_not_available",
+        ErrorKind::PermissionDenied => return "permission_denied",
+        _ => {}
+    }
+
+    let msg = io.to_string().to_ascii_lowercase();
+    if msg.contains("failed to lookup")
+        || msg.contains("name or service")
+        || msg.contains("temporary failure in name resolution")
+        || msg.contains("nodename nor servname")
+        || msg.contains("dns")
+    {
+        "dns"
+    } else if msg.contains("certificate")
+        || msg.contains("unknown issuer")
+        || msg.contains("invalid peer")
+        || msg.contains("cert")
+    {
+        "tls_certificate"
+    } else if msg.contains("tls")
+        || msg.contains("handshake")
+        || msg.contains("rustls")
+        || msg.contains("alert")
+    {
+        "tls_handshake"
+    } else if msg.contains("network is unreachable") {
+        "network_unreachable"
+    } else if msg.contains("no route to host") {
+        "no_route_to_host"
+    } else if msg.contains("connection reset") {
+        "connection_reset"
+    } else if msg.contains("broken pipe") {
+        "broken_pipe"
+    } else {
+        "io_other"
+    }
+}
+
 pub fn classify_direct_error(err: &anyhow::Error) -> &'static str {
     for cause in err.chain() {
         if let Some(ws_err) = cause.downcast_ref::<tokio_tungstenite::tungstenite::Error>() {
@@ -82,14 +131,7 @@ pub fn classify_direct_error(err: &anyhow::Error) -> &'static str {
                     _ => "http_other",
                 },
                 WsError::Tls(_) => "tls",
-                WsError::Io(io) => match io.kind() {
-                    std::io::ErrorKind::ConnectionRefused => "connection_refused",
-                    std::io::ErrorKind::ConnectionReset => "connection_reset",
-                    std::io::ErrorKind::ConnectionAborted => "connection_aborted",
-                    std::io::ErrorKind::TimedOut => "io_timeout",
-                    std::io::ErrorKind::NotFound => "dns_or_not_found",
-                    _ => "io_other",
-                },
+                WsError::Io(io) => classify_io_error(io),
                 WsError::Protocol(_) => "websocket_protocol",
                 WsError::Utf8 => "websocket_utf8",
                 _ => "websocket_other",
@@ -110,4 +152,28 @@ pub fn classify_direct_error(err: &anyhow::Error) -> &'static str {
 
 pub async fn close_backend(mut ws: BackendWs) {
     let _ = ws.send(Message::Close(None)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_io_error;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn classifies_dns_hidden_inside_io_other() {
+        let err = Error::new(ErrorKind::Other, "failed to lookup address information");
+        assert_eq!(classify_io_error(&err), "dns");
+    }
+
+    #[test]
+    fn classifies_tls_certificate_hidden_inside_io_other() {
+        let err = Error::new(ErrorKind::Other, "invalid peer certificate: unknown issuer");
+        assert_eq!(classify_io_error(&err), "tls_certificate");
+    }
+
+    #[test]
+    fn classifies_network_unreachable_hidden_inside_io_other() {
+        let err = Error::new(ErrorKind::Other, "network is unreachable");
+        assert_eq!(classify_io_error(&err), "network_unreachable");
+    }
 }
