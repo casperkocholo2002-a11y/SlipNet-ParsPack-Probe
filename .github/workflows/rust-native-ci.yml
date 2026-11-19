@@ -1,9 +1,9 @@
-name: Rust native CI
+name: Frankfurt standalone failover CI
 
 on:
   push:
     branches:
-      - native-rust-parspack-v1
+      - frankfurt-standalone-failover-v1
   workflow_dispatch:
 
 permissions:
@@ -16,20 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.79.0
-        with:
-          components: rustfmt
-      - name: Format
-        run: cargo fmt --check
       - name: Test
         run: cargo test --all-targets
       - name: Release build
         run: cargo build --release
-      - name: Binary size
-        run: ls -lh target/release/slipnet-parspack-rust
-      - name: Upload lockfile and binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-native-build
-          path: |
-            Cargo.lock
-            target/release/slipnet-parspack-rust
+      - name: Binary
+        run: ls -lh target/release/slipnet-frankfurt-failover
