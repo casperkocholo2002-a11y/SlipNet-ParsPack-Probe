@@ -86,3 +86,7 @@ vless://UUID@PAAS_HOST:443?encryption=none&security=tls&type=ws&host=PAAS_HOST&p
 ## Capacity policy
 
 Do not treat the configured `MAX_SESSIONS` as proven capacity. Start with the minimum Frankfurt plan, then load-test the deployed endpoint with realistic concurrent sessions and throughput. The failover should remain unused in normal operation.
+
+## Release gate
+
+A GitHub Actions build/test run must pass before this branch is deployed to PaaS.
