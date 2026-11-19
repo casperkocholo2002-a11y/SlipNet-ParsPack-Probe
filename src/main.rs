@@ -39,7 +39,7 @@ use tls::BackendWs;
 const MAX_ECHO: usize = 16 * 1024 * 1024;
 const MAX_STREAM: usize = 8 * 1024 * 1024;
 const MAX_WS: usize = 1024 * 1024;
-const BUILD_ID: &str = "rust-native-v6-direct-dns-diagnostic";
+const BUILD_ID: &str = "rust-native-v7-canonical-dns-diagnostic";
 
 #[derive(Clone)]
 struct AppState {
@@ -188,6 +188,7 @@ async fn direct_dns_check() -> Response {
     const CANONICAL: &str = "slipnet.wordpresscsp.ir";
     let host = resolve_summary(&config.host, config.port).await;
     let servername = resolve_summary(&config.servername, config.port).await;
+    let canonical = resolve_summary(CANONICAL, config.port).await;
 
     json_response(
         StatusCode::OK,
@@ -200,6 +201,7 @@ async fn direct_dns_check() -> Response {
             "servernameCanonical": config.servername == CANONICAL,
             "hostResolve": host,
             "servernameResolve": servername,
+            "canonicalResolve": canonical,
         }),
     )
 }
