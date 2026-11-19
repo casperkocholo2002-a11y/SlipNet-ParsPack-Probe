@@ -1,509 +1,622 @@
-mod config;
-mod guard;
-mod tls;
-
-use anyhow::Result;
-use async_stream::stream;
 use axum::{
-    body::Body,
     extract::{
-        ws::{Message as AMessage, WebSocket, WebSocketUpgrade},
-        ConnectInfo, DefaultBodyLimit, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        ConnectInfo, State,
     },
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use serde_json::json;
 use std::{
-    convert::Infallible,
-    net::SocketAddr,
+    collections::HashMap,
+    env,
+    error::Error,
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_tungstenite::tungstenite::Message as TMessage;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{lookup_host, TcpListener, TcpStream},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+};
 
-use config::*;
-use guard::{SessionGuard, SessionMeta};
-use tls::BackendWs;
+const BUILD_ID: &str = "frankfurt-standalone-failover-v1";
+const MAX_PREFACE: usize = 4096;
+const MAX_WS_MESSAGE: usize = 1024 * 1024;
+type DynError = Box<dyn Error + Send + Sync>;
+type DynResult<T> = Result<T, DynError>;
+type UserId = [u8; 16];
 
-const MAX_ECHO: usize = 16 * 1024 * 1024;
-const MAX_STREAM: usize = 8 * 1024 * 1024;
-const MAX_WS: usize = 1024 * 1024;
-const BUILD_ID: &str = "rust-native-v8-parity-final";
+#[derive(Clone)]
+struct Config {
+    port: u16,
+    ws_path: String,
+    users: HashMap<UserId, String>,
+    max_sessions: usize,
+    max_ips_per_user: usize,
+    connect_timeout: Duration,
+    allow_private_targets: bool,
+    trust_proxy_headers: bool,
+}
+
+impl Config {
+    fn from_env() -> Result<Self, String> {
+        let port = env::var("PORT")
+            .unwrap_or_else(|_| "8080".into())
+            .parse::<u16>()
+            .map_err(|_| "PORT must be a valid TCP port")?;
+
+        let mut ws_path = env::var("WS_PATH").unwrap_or_else(|_| "/failover".into());
+        if !ws_path.starts_with('/') {
+            ws_path.insert(0, '/');
+        }
+        if ws_path == "/health"
+            || ws_path.contains('{')
+            || ws_path.contains('}')
+            || ws_path.contains('*')
+        {
+            return Err("WS_PATH is invalid or reserved".into());
+        }
+
+        let users_raw = env::var("VLESS_USERS")
+            .map_err(|_| "VLESS_USERS is required, e.g. ME=uuid,ELAHE=uuid")?;
+        let users = parse_users(&users_raw)?;
+        if users.is_empty() {
+            return Err("VLESS_USERS must contain at least one user".into());
+        }
+
+        Ok(Self {
+            port,
+            ws_path,
+            users,
+            max_sessions: env_usize("MAX_SESSIONS", 128, 1, 4096)?,
+            max_ips_per_user: env_usize("MAX_IPS_PER_USER", 3, 1, 32)?,
+            connect_timeout: Duration::from_secs(env_u64("CONNECT_TIMEOUT_SECS", 10, 1, 60)?),
+            allow_private_targets: env_bool("ALLOW_PRIVATE_TARGETS", false),
+            trust_proxy_headers: env_bool("TRUST_PROXY_HEADERS", true),
+        })
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
-    guard: Arc<SessionGuard>,
-    sessions: Arc<AtomicUsize>,
+    cfg: Arc<Config>,
+    slots: Arc<Semaphore>,
+    active_sessions: Arc<AtomicUsize>,
+    bytes_up: Arc<AtomicU64>,
+    bytes_down: Arc<AtomicU64>,
+    active_ips: Arc<Mutex<HashMap<UserId, HashMap<IpAddr, usize>>>>,
 }
 
-struct SessionPermit(Arc<AtomicUsize>);
+struct SessionCounter(Arc<AtomicUsize>);
 
-impl SessionPermit {
+impl SessionCounter {
     fn new(counter: Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::SeqCst);
         Self(counter)
     }
 }
 
-impl Drop for SessionPermit {
+impl Drop for SessionCounter {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-fn json_response(status: StatusCode, value: Value) -> Response {
-    let mut response = (status, Json(value)).into_response();
-    let headers = response.headers_mut();
-    headers.insert("cache-control", HeaderValue::from_static("no-store"));
-    headers.insert("x-slipnet-probe", HeaderValue::from_static("1"));
-    response
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Ip(IpAddr),
+    Domain(String),
+}
+
+#[derive(Debug)]
+struct VlessRequest {
+    version: u8,
+    user_id: UserId,
+    target: Target,
+    port: u16,
+    payload: Vec<u8>,
+}
+
+#[tokio::main]
+async fn main() -> DynResult<()> {
+    let cfg = Arc::new(
+        Config::from_env().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+    );
+    let state = AppState {
+        slots: Arc::new(Semaphore::new(cfg.max_sessions)),
+        cfg: cfg.clone(),
+        active_sessions: Arc::new(AtomicUsize::new(0)),
+        bytes_up: Arc::new(AtomicU64::new(0)),
+        bytes_down: Arc::new(AtomicU64::new(0)),
+        active_ips: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .route(&cfg.ws_path, get(vless_ws))
+        .fallback(not_found)
+        .with_state(state);
+
+    let listener = TcpListener::bind(("0.0.0.0", cfg.port)).await?;
+    eprintln!(
+        "SlipNet Frankfurt failover listening on 0.0.0.0:{} path={} build={}",
+        cfg.port, cfg.ws_path, BUILD_ID
+    );
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
+
+    Ok(())
 }
 
 async fn health(State(state): State<AppState>) -> Response {
-    let direct = direct_config();
-    let relay_configured = origin_config().is_some();
-    json_response(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "service": "slipnet-parspack-ingress-probe",
-            "runtime": format!("rust-{}", env!("CARGO_PKG_VERSION")),
-            "relayConfigured": relay_configured,
-            "directRelayConfigured": direct.valid(),
-            "originSniSent": false,
-            "directOriginSniSent": true,
-            "originTlsMin": "TLSv1.3",
-            "directRelayMode": "wss",
-            "workerDirectConfigured": !worker_direct_host().is_empty() && !worker_direct_path().is_empty(),
-            "workerFixedConfigured": !worker_fixed_host().is_empty() && !worker_fixed_path().is_empty(),
-            "workerRelayMode": "wss",
-            "concurrencyGuardEnabled": state.guard.enabled,
-            "concurrencyGuardRoute": state.guard.route,
-            "activeSessions": state.sessions.load(Ordering::SeqCst),
-            "build": BUILD_ID,
-        }),
-    )
+    Json(json!({
+        "ok": true,
+        "service": "slipnet-frankfurt-failover",
+        "build": BUILD_ID,
+        "standalone": true,
+        "mode": "direct-egress",
+        "protocol": "vless-ws-tcp",
+        "originRequired": false,
+        "server95Required": false,
+        "server155Required": false,
+        "users": state.cfg.users.len(),
+        "activeSessions": state.active_sessions.load(Ordering::SeqCst),
+        "maxSessions": state.cfg.max_sessions,
+        "maxIpsPerUser": state.cfg.max_ips_per_user,
+        "bytesUp": state.bytes_up.load(Ordering::Relaxed),
+        "bytesDown": state.bytes_down.load(Ordering::Relaxed),
+    }))
+    .into_response()
 }
 
-async fn origin_check() -> Response {
-    let Some((host, port, _)) = origin_config() else {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"ok": false, "error": "origin_check_not_configured"}),
-        );
-    };
-
-    let start = std::time::Instant::now();
-    let mut tcp = match tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::TcpStream::connect((&*host, port)),
-    )
-    .await
-    {
-        Ok(Ok(tcp)) => tcp,
-        _ => {
-            return json_response(
-                StatusCode::BAD_GATEWAY,
-                json!({"ok": false, "connected": false, "error": "connect_error", "ms": start.elapsed().as_millis()}),
-            )
-        }
-    };
-    let _ = tcp.set_nodelay(true);
-    let mut buf = [0u8; 256];
-    let n = match tokio::time::timeout(Duration::from_millis(800), tcp.read(&mut buf)).await {
-        Ok(Ok(n)) => n,
-        _ => 0,
-    };
-    let banner: String = buf[..n]
-        .iter()
-        .filter_map(|b| {
-            if *b == b'\r' || *b == b'\n' || (0x20..=0x7e).contains(b) {
-                Some(*b as char)
-            } else {
-                None
-            }
-        })
-        .take(160)
-        .collect();
-
-    json_response(
-        StatusCode::OK,
-        json!({"ok": true, "connected": true, "ms": start.elapsed().as_millis(), "banner": banner}),
-    )
+async fn not_found() -> Response {
+    StatusCode::NOT_FOUND.into_response()
 }
 
-async fn direct_origin_check() -> Response {
-    let config = direct_config();
-    if !config.valid() {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"ok": false, "error": "direct_origin_check_not_configured"}),
-        );
-    }
-    let start = std::time::Instant::now();
-    match tls::dial_direct_ws(&config).await {
-        Ok(ws) => {
-            tls::close_backend(ws).await;
-            json_response(
-                StatusCode::OK,
-                json!({"ok": true, "connected": true, "mode": "wss", "ms": start.elapsed().as_millis()}),
-            )
-        }
-        Err(err) => {
-            let kind = tls::classify_direct_error(&err);
-            json_response(
-                StatusCode::BAD_GATEWAY,
-                json!({"ok": false, "connected": false, "error": "wss_connect_error", "kind": kind, "ms": start.elapsed().as_millis()}),
-            )
-        }
-    }
-}
-
-async fn echo(body: Bytes) -> Response {
-    if body.len() > MAX_ECHO {
-        let mut response = StatusCode::PAYLOAD_TOO_LARGE.into_response();
-        response
-            .headers_mut()
-            .insert("x-slipnet-probe", HeaderValue::from_static("1"));
-        return response;
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(&body);
-    json_response(
-        StatusCode::OK,
-        json!({"ok": true, "bytes": body.len(), "sha256": hex::encode(hasher.finalize())}),
-    )
-}
-
-#[derive(Deserialize)]
-struct StreamQuery {
-    bytes: Option<usize>,
-    chunk: Option<usize>,
-    delay_ms: Option<u64>,
-}
-
-async fn stream_http(Query(q): Query<StreamQuery>) -> Response {
-    let total = q.bytes.unwrap_or(1024 * 1024).clamp(1, MAX_STREAM);
-    let chunk_size = q.chunk.unwrap_or(16 * 1024).clamp(1, 64 * 1024);
-    let delay_ms = q.delay_ms.unwrap_or(0).min(1000);
-
-    let body_stream = stream! {
-        let chunk = Bytes::from(vec![0x53; chunk_size]);
-        let mut sent = 0usize;
-        while sent < total {
-            let n = (total - sent).min(chunk_size);
-            yield Ok::<Bytes, Infallible>(chunk.slice(..n));
-            sent += n;
-            if delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-    };
-
-    let mut response = Body::from_stream(body_stream).into_response();
-    let headers = response.headers_mut();
-    headers.insert(
-        "content-type",
-        HeaderValue::from_static("application/octet-stream"),
-    );
-    headers.insert("cache-control", HeaderValue::from_static("no-store"));
-    headers.insert("x-slipnet-probe", HeaderValue::from_static("1"));
-    headers.insert(
-        HeaderName::from_static("x-probe-total-bytes"),
-        HeaderValue::from_str(&total.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0")),
-    );
-    response
-}
-
-#[derive(Deserialize)]
-struct HoldQuery {
-    seconds: Option<u64>,
-}
-
-async fn hold_http(Query(q): Query<HoldQuery>) -> Response {
-    let seconds = q.seconds.unwrap_or(30).clamp(1, 120);
-    let body_stream = stream! {
-        for _ in 0..seconds {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            yield Ok::<Bytes, Infallible>(Bytes::from_static(b"tick\n"));
-        }
-        yield Ok::<Bytes, Infallible>(Bytes::from_static(b"done\n"));
-    };
-    let mut response = Body::from_stream(body_stream).into_response();
-    response
-        .headers_mut()
-        .insert("content-type", HeaderValue::from_static("text/plain"));
-    response
-        .headers_mut()
-        .insert("cache-control", HeaderValue::from_static("no-store"));
-    response
-        .headers_mut()
-        .insert("x-slipnet-probe", HeaderValue::from_static("1"));
-    response
-}
-
-async fn echo_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.max_message_size(MAX_WS)
-        .on_upgrade(move |mut socket| async move {
-            let _permit = SessionPermit::new(state.sessions.clone());
-            while let Some(Ok(message)) = socket.recv().await {
-                match message {
-                    AMessage::Text(_)
-                    | AMessage::Binary(_)
-                    | AMessage::Ping(_)
-                    | AMessage::Pong(_) => {
-                        if socket.send(message).await.is_err() {
-                            break;
-                        }
-                    }
-                    AMessage::Close(_) => break,
-                }
-            }
-        })
-}
-
-async fn read_initial_payload(socket: &mut WebSocket, needed: usize) -> Result<Vec<u8>> {
-    Ok(tokio::time::timeout(Duration::from_secs(5), async {
-        let mut out = Vec::with_capacity(needed);
-        while out.len() < needed {
-            let message = socket
-                .recv()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("websocket_closed"))??;
-            let bytes: Vec<u8> = match message {
-                AMessage::Binary(data) => data.to_vec(),
-                AMessage::Text(text) => text.as_str().as_bytes().to_vec(),
-                AMessage::Close(_) => anyhow::bail!("websocket_closed"),
-                _ => continue,
-            };
-            if bytes.len() > MAX_WS || out.len() + bytes.len() > MAX_WS {
-                anyhow::bail!("initial_payload_too_large");
-            }
-            out.extend_from_slice(&bytes);
-        }
-        Ok::<Vec<u8>, anyhow::Error>(out)
-    })
-    .await??)
-}
-
-async fn primary_relay(
+async fn vless_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    let origin = match tls::dial_primary_origin().await {
-        Ok(origin) => origin,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    let slot = match state.slots.clone().try_acquire_owned() {
+        Ok(slot) => slot,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
+    let source_ip = source_ip(&headers, peer, state.cfg.trust_proxy_headers);
 
-    ws.max_message_size(MAX_WS)
+    ws.max_message_size(MAX_WS_MESSAGE)
         .on_upgrade(move |socket| async move {
-            if let Err(error) = primary_session(socket, origin, headers, peer, state).await {
-                eprintln!("primary session ended: {error:#}");
+            let _slot = slot;
+            let _count = SessionCounter::new(state.active_sessions.clone());
+            if let Err(err) = handle_session(socket, state, source_ip).await {
+                eprintln!("session ended: {err}");
             }
         })
 }
 
-async fn primary_session(
+async fn handle_session(
     mut socket: WebSocket,
-    mut origin: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-    headers: HeaderMap,
-    peer: SocketAddr,
     state: AppState,
-) -> Result<()> {
-    let _permit = SessionPermit::new(state.sessions.clone());
-    let mut meta: Option<SessionMeta> = None;
+    source_ip: IpAddr,
+) -> DynResult<()> {
+    let request = read_request(&mut socket).await?;
 
-    if state.guard.enabled {
-        let source = guard::source_ip(&headers, peer, &state.guard.route);
-        if !source.is_empty() {
-            let initial = read_initial_payload(&mut socket, 17).await?;
-            meta = state.guard.new_meta(&headers, peer, &initial[..17])?;
-            if let Some(m) = meta.as_ref() {
-                if state.guard.emit(m, "open").await.is_some_and(|s| s.locked) {
-                    return Ok(());
-                }
-            }
-            origin.write_all(&initial).await?;
-        }
+    if !state.cfg.users.contains_key(&request.user_id) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unknown user").into());
     }
 
-    let close_meta = meta.clone();
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (mut origin_rx, mut origin_tx) = tokio::io::split(origin);
+    if !register_ip(&state, request.user_id, source_ip).await {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "ip limit reached").into());
+    }
 
-    let client_to_origin = async {
-        while let Some(message) = ws_rx.next().await {
-            match message? {
-                AMessage::Binary(data) => origin_tx.write_all(&data).await?,
-                AMessage::Text(text) => origin_tx.write_all(text.as_str().as_bytes()).await?,
-                AMessage::Close(_) => break,
-                AMessage::Ping(_) | AMessage::Pong(_) => {}
+    let user_id = request.user_id;
+    let result = run_authenticated_session(socket, state.clone(), request).await;
+    unregister_ip(&state, user_id, source_ip).await;
+    result
+}
+
+async fn read_request(socket: &mut WebSocket) -> DynResult<VlessRequest> {
+    let mut preface = Vec::new();
+
+    loop {
+        let message = socket
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "websocket closed"))??;
+
+        match message {
+            Message::Binary(data) => preface.extend_from_slice(&data),
+            Message::Text(text) => preface.extend_from_slice(text.as_bytes()),
+            Message::Close(_) => {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "websocket closed").into())
             }
+            Message::Ping(_) | Message::Pong(_) => continue,
         }
-        Ok::<(), anyhow::Error>(())
+
+        if preface.len() > MAX_PREFACE {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "vless header too large").into());
+        }
+
+        match parse_vless_request(&preface) {
+            Ok(Some(request)) => return Ok(request),
+            Ok(None) => continue,
+            Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err).into()),
+        }
+    }
+}
+
+fn parse_vless_request(data: &[u8]) -> Result<Option<VlessRequest>, String> {
+    if data.len() < 18 {
+        return Ok(None);
+    }
+
+    let version = data[0];
+    let mut user_id = [0u8; 16];
+    user_id.copy_from_slice(&data[1..17]);
+
+    let addon_len = data[17] as usize;
+    let mut cursor = 18usize
+        .checked_add(addon_len)
+        .ok_or_else(|| "invalid addon length".to_string())?;
+
+    if data.len() < cursor + 4 {
+        return Ok(None);
+    }
+
+    let command = data[cursor];
+    cursor += 1;
+    if command != 0x01 {
+        return Err("only VLESS TCP command is supported".into());
+    }
+
+    let port = u16::from_be_bytes([data[cursor], data[cursor + 1]]);
+    cursor += 2;
+    if port == 0 {
+        return Err("destination port 0 is invalid".into());
+    }
+
+    let address_type = data[cursor];
+    cursor += 1;
+
+    let target = match address_type {
+        0x01 => {
+            if data.len() < cursor + 4 {
+                return Ok(None);
+            }
+            let ip = Ipv4Addr::new(
+                data[cursor],
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+            );
+            cursor += 4;
+            Target::Ip(IpAddr::V4(ip))
+        }
+        0x02 => {
+            if data.len() < cursor + 1 {
+                return Ok(None);
+            }
+            let len = data[cursor] as usize;
+            cursor += 1;
+            if len == 0 {
+                return Err("empty domain is invalid".into());
+            }
+            if data.len() < cursor + len {
+                return Ok(None);
+            }
+            let domain = std::str::from_utf8(&data[cursor..cursor + len])
+                .map_err(|_| "domain is not valid UTF-8")?
+                .to_owned();
+            cursor += len;
+            Target::Domain(domain)
+        }
+        0x03 => {
+            if data.len() < cursor + 16 {
+                return Ok(None);
+            }
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&data[cursor..cursor + 16]);
+            cursor += 16;
+            Target::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        _ => return Err("unsupported address type".into()),
     };
 
-    let origin_to_client = async {
+    Ok(Some(VlessRequest {
+        version,
+        user_id,
+        target,
+        port,
+        payload: data[cursor..].to_vec(),
+    }))
+}
+
+async fn run_authenticated_session(
+    socket: WebSocket,
+    state: AppState,
+    request: VlessRequest,
+) -> DynResult<()> {
+    let mut target =
+        connect_target(&request.target, request.port, &state.cfg).await?;
+    target.set_nodelay(true)?;
+
+    let (mut client_tx, mut client_rx) = socket.split();
+
+    client_tx
+        .send(Message::Binary(vec![request.version, 0x00]))
+        .await?;
+
+    if !request.payload.is_empty() {
+        target.write_all(&request.payload).await?;
+        state
+            .bytes_up
+            .fetch_add(request.payload.len() as u64, Ordering::Relaxed);
+    }
+
+    let (mut target_rx, mut target_tx) = target.into_split();
+
+    let upload_state = state.clone();
+    let client_to_target = async move {
+        while let Some(message) = client_rx.next().await {
+            match message? {
+                Message::Binary(data) => {
+                    target_tx.write_all(&data).await?;
+                    upload_state
+                        .bytes_up
+                        .fetch_add(data.len() as u64, Ordering::Relaxed);
+                }
+                Message::Text(text) => {
+                    let bytes = text.as_bytes();
+                    target_tx.write_all(bytes).await?;
+                    upload_state
+                        .bytes_up
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                }
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => {}
+            }
+        }
+        let _ = target_tx.shutdown().await;
+        Ok::<(), DynError>(())
+    };
+
+    let download_state = state.clone();
+    let target_to_client = async move {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = origin_rx.read(&mut buf).await?;
+            let n = target_rx.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
-            ws_tx.send(AMessage::Binary(buf[..n].to_vec())).await?;
+            client_tx.send(Message::Binary(buf[..n].to_vec())).await?;
+            download_state
+                .bytes_down
+                .fetch_add(n as u64, Ordering::Relaxed);
         }
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), DynError>(())
     };
 
-    let heartbeat = async {
-        let Some(m) = meta.as_ref() else {
-            futures_util::future::pending::<()>().await;
-            return Ok::<(), anyhow::Error>(());
-        };
-        let mut ticker = tokio::time::interval(state.guard.heartbeat);
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let mut response = state.guard.emit(m, "heartbeat").await;
-            if response
-                .as_ref()
-                .is_some_and(|s| s.known && s.session_known == Some(false))
+    tokio::select! {
+        result = client_to_target => result?,
+        result = target_to_client => result?,
+    }
+
+    Ok(())
+}
+
+async fn connect_target(target: &Target, port: u16, cfg: &Config) -> io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = match target {
+        Target::Ip(ip) => vec![SocketAddr::new(*ip, port)],
+        Target::Domain(domain) => {
+            let resolved = tokio::time::timeout(cfg.connect_timeout, lookup_host((domain.as_str(), port)))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns lookup timed out"))??;
+            resolved.collect()
+        }
+    };
+
+    let mut last_error: Option<io::Error> = None;
+    let mut allowed_seen = false;
+
+    for addr in addrs {
+        if !cfg.allow_private_targets && is_forbidden_ip(addr.ip()) {
+            continue;
+        }
+        allowed_seen = true;
+
+        match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => last_error = Some(err),
+            Err(_) => {
+                last_error = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "destination connect timed out",
+                ))
+            }
+        }
+    }
+
+    if !allowed_seen {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "destination resolves only to blocked private/local addresses",
+        ));
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "destination has no usable address")
+    }))
+}
+
+fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
+}
+
+async fn register_ip(state: &AppState, user_id: UserId, ip: IpAddr) -> bool {
+    let mut all = state.active_ips.lock().await;
+    let per_user = all.entry(user_id).or_default();
+
+    if !per_user.contains_key(&ip) && per_user.len() >= state.cfg.max_ips_per_user {
+        return false;
+    }
+
+    *per_user.entry(ip).or_insert(0) += 1;
+    true
+}
+
+async fn unregister_ip(state: &AppState, user_id: UserId, ip: IpAddr) {
+    let mut all = state.active_ips.lock().await;
+    let remove_user = if let Some(per_user) = all.get_mut(&user_id) {
+        if let Some(count) = per_user.get_mut(&ip) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                per_user.remove(&ip);
+            }
+        }
+        per_user.is_empty()
+    } else {
+        false
+    };
+
+    if remove_user {
+        all.remove(&user_id);
+    }
+}
+
+fn source_ip(headers: &HeaderMap, peer: SocketAddr, trust_proxy_headers: bool) -> IpAddr {
+    if trust_proxy_headers {
+        for name in ["cf-connecting-ip", "x-real-ip"] {
+            if let Some(ip) = headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<IpAddr>().ok())
             {
-                response = state.guard.emit(m, "open").await;
-            }
-            if response.as_ref().is_some_and(|s| s.locked) {
-                break;
+                return ip;
             }
         }
-        Ok::<(), anyhow::Error>(())
-    };
 
-    tokio::select! {
-        _ = client_to_origin => {},
-        _ = origin_to_client => {},
-        _ = heartbeat => {},
-    }
-
-    if let Some(m) = close_meta {
-        let guard = state.guard.clone();
-        tokio::spawn(async move {
-            let _ = guard.emit(&m, "close").await;
-        });
-    }
-    Ok(())
-}
-
-async fn direct_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    let config = direct_config();
-    if !config.valid() {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-    let backend = match tls::dial_direct_ws(&config).await {
-        Ok(backend) => backend,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
-    ws.max_message_size(MAX_WS)
-        .on_upgrade(move |socket| async move {
-            let _ = proxy_backend_session(socket, backend, state).await;
-        })
-}
-
-async fn worker_direct_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    let url = worker_url(&worker_direct_host(), &worker_direct_path());
-    backend_relay_response(ws, state, &url).await
-}
-
-async fn worker_fixed_relay(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    let url = worker_url(&worker_fixed_host(), &worker_fixed_path());
-    backend_relay_response(ws, state, &url).await
-}
-
-async fn backend_relay_response(ws: WebSocketUpgrade, state: AppState, url: &str) -> Response {
-    let backend = match tls::dial_url_ws(url).await {
-        Ok(backend) => backend,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
-    ws.max_message_size(MAX_WS)
-        .on_upgrade(move |socket| async move {
-            let _ = proxy_backend_session(socket, backend, state).await;
-        })
-}
-
-async fn proxy_backend_session(
-    socket: WebSocket,
-    backend: BackendWs,
-    state: AppState,
-) -> Result<()> {
-    let _permit = SessionPermit::new(state.sessions.clone());
-    let (mut client_tx, mut client_rx) = socket.split();
-    let (mut backend_tx, mut backend_rx) = backend.split();
-
-    let client_to_backend = async {
-        while let Some(message) = client_rx.next().await {
-            match message? {
-                AMessage::Binary(data) => backend_tx.send(TMessage::Binary(data)).await?,
-                AMessage::Text(text) => {
-                    backend_tx
-                        .send(TMessage::Text(text.to_string().into()))
-                        .await?
-                }
-                AMessage::Ping(data) => backend_tx.send(TMessage::Ping(data)).await?,
-                AMessage::Pong(data) => backend_tx.send(TMessage::Pong(data)).await?,
-                AMessage::Close(_) => {
-                    let _ = backend_tx.send(TMessage::Close(None)).await;
-                    break;
-                }
-            }
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+        {
+            return ip;
         }
-        Ok::<(), anyhow::Error>(())
-    };
-
-    let backend_to_client = async {
-        while let Some(message) = backend_rx.next().await {
-            match message? {
-                TMessage::Binary(data) => client_tx.send(AMessage::Binary(data)).await?,
-                TMessage::Text(text) => {
-                    client_tx
-                        .send(AMessage::Text(text.to_string().into()))
-                        .await?
-                }
-                TMessage::Ping(data) => client_tx.send(AMessage::Ping(data)).await?,
-                TMessage::Pong(data) => client_tx.send(AMessage::Pong(data)).await?,
-                TMessage::Close(_) => {
-                    let _ = client_tx.send(AMessage::Close(None)).await;
-                    break;
-                }
-                TMessage::Frame(_) => {}
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    };
-
-    tokio::select! {
-        _ = client_to_backend => {},
-        _ = backend_to_client => {},
     }
-    Ok(())
+
+    peer.ip()
 }
 
-async fn not_found() -> Response {
-    json_response(
-        StatusCode::NOT_FOUND,
-        json!({"ok": false, "error": "not_found"}),
-    )
+fn parse_users(raw: &str) -> Result<HashMap<UserId, String>, String> {
+    let mut users = HashMap::new();
+
+    for (index, item) in raw.split(',').enumerate() {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+
+        let (name, uuid_text) = match item.split_once('=') {
+            Some((name, uuid)) => (name.trim().to_owned(), uuid.trim()),
+            None => (format!("user{}", index + 1), item),
+        };
+
+        if name.is_empty() {
+            return Err("VLESS_USERS contains an empty user name".into());
+        }
+
+        let id = parse_uuid(uuid_text)?;
+        if users.insert(id, name).is_some() {
+            return Err("VLESS_USERS contains a duplicate UUID".into());
+        }
+    }
+
+    Ok(users)
+}
+
+fn parse_uuid(value: &str) -> Result<UserId, String> {
+    let compact: String = value.chars().filter(|c| *c != '-').collect();
+    if compact.len() != 32 {
+        return Err(format!("invalid UUID: {value}"));
+    }
+
+    let mut out = [0u8; 16];
+    for (index, slot) in out.iter_mut().enumerate() {
+        let pos = index * 2;
+        *slot = u8::from_str_radix(&compact[pos..pos + 2], 16)
+            .map_err(|_| format!("invalid UUID: {value}"))?;
+    }
+    Ok(out)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    match env::var(name) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
+}
+
+fn env_usize(name: &str, default: usize, min: usize, max: usize) -> Result<usize, String> {
+    let value = match env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .map_err(|_| format!("{name} must be an integer"))?,
+        Err(_) => default,
+    };
+    if !(min..=max).contains(&value) {
+        return Err(format!("{name} must be between {min} and {max}"));
+    }
+    Ok(value)
+}
+
+fn env_u64(name: &str, default: u64, min: u64, max: u64) -> Result<u64, String> {
+    let value = match env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| format!("{name} must be an integer"))?,
+        Err(_) => default,
+    };
+    if !(min..=max).contains(&value) {
+        return Err(format!("{name} must be between {min} and {max}"));
+    }
+    Ok(value)
 }
 
 async fn shutdown_signal() {
@@ -530,50 +643,71 @@ async fn shutdown_signal() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let port = env_int("PORT", "");
-    let port = if (1..=65535).contains(&port) {
-        port as u16
-    } else {
-        8080
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let state = AppState {
-        guard: Arc::new(SessionGuard::new("parspack")),
-        sessions: Arc::new(AtomicUsize::new(0)),
-    };
+    fn user() -> UserId {
+        parse_uuid("00112233-4455-6677-8899-aabbccddeeff").unwrap()
+    }
 
-    let relay = relay_path();
-    let direct = direct_relay_path();
-    let worker_direct = worker_direct_relay_path();
-    let worker_fixed = worker_fixed_relay_path();
+    #[test]
+    fn parses_domain_request_and_payload() {
+        let mut data = vec![0x00];
+        data.extend_from_slice(&user());
+        data.push(0x00);
+        data.push(0x01);
+        data.extend_from_slice(&443u16.to_be_bytes());
+        data.push(0x02);
+        data.push(11);
+        data.extend_from_slice(b"example.com");
+        data.extend_from_slice(b"hello");
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/origin-check", get(origin_check))
-        .route("/direct-origin-check", get(direct_origin_check))
-        .route("/echo", post(echo))
-        .route("/stream", get(stream_http))
-        .route("/hold", get(hold_http))
-        .route("/ws", get(echo_ws))
-        .route(&relay, get(primary_relay))
-        .route(&direct, get(direct_relay))
-        .route(&worker_direct, get(worker_direct_relay))
-        .route(&worker_fixed, get(worker_fixed_relay))
-        .fallback(not_found)
-        .layer(DefaultBodyLimit::max(MAX_ECHO + 1))
-        .with_state(state);
+        let parsed = parse_vless_request(&data).unwrap().unwrap();
+        assert_eq!(parsed.user_id, user());
+        assert_eq!(parsed.port, 443);
+        assert_eq!(parsed.target, Target::Domain("example.com".into()));
+        assert_eq!(parsed.payload, b"hello");
+    }
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    eprintln!("slipnet-parspack-rust listening on {port} build={BUILD_ID}");
+    #[test]
+    fn parses_ipv4_request() {
+        let mut data = vec![0x00];
+        data.extend_from_slice(&user());
+        data.push(0x00);
+        data.push(0x01);
+        data.extend_from_slice(&80u16.to_be_bytes());
+        data.push(0x01);
+        data.extend_from_slice(&[1, 1, 1, 1]);
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+        let parsed = parse_vless_request(&data).unwrap().unwrap();
+        assert_eq!(parsed.target, Target::Ip("1.1.1.1".parse().unwrap()));
+    }
 
-    Ok(())
+    #[test]
+    fn waits_for_partial_header() {
+        let data = vec![0u8; 10];
+        assert!(parse_vless_request(&data).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_udp_command() {
+        let mut data = vec![0x00];
+        data.extend_from_slice(&user());
+        data.push(0x00);
+        data.push(0x02);
+        data.extend_from_slice(&53u16.to_be_bytes());
+        data.push(0x01);
+        data.extend_from_slice(&[1, 1, 1, 1]);
+
+        assert!(parse_vless_request(&data).is_err());
+    }
+
+    #[test]
+    fn blocks_private_targets_by_default() {
+        assert!(is_forbidden_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_forbidden_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_forbidden_ip("::1".parse().unwrap()));
+        assert!(!is_forbidden_ip("1.1.1.1".parse().unwrap()));
+    }
 }
