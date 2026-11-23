@@ -148,4 +148,3 @@ pub fn origin_config() -> Option<(String, u16, String)> {
 pub fn worker_url(host: &str, path: &str) -> String {
     format!("wss://{}{}", host, path)
 }
-
