@@ -307,9 +307,7 @@ async fn primary_relay(
         .get("host")
         .and_then(|value| value.to_str().ok())
         .and_then(|host| host.split(':').next())
-        .is_some_and(|host| {
-            host.eq_ignore_ascii_case("app-rust-80q2t.apps.teh11.abrhapaas.com")
-        });
+        .is_some_and(|host| host.eq_ignore_ascii_case("app-rust-80q2t.apps.teh11.abrhapaas.com"));
     if legacy_host {
         return backend_relay_response(
             ws,
@@ -593,3 +591,4 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
