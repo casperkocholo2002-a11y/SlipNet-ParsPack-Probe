@@ -177,4 +177,3 @@ mod tests {
         assert_eq!(classify_io_error(&err), "network_unreachable");
     }
 }
-
