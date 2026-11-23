@@ -39,7 +39,7 @@ use tls::BackendWs;
 const MAX_ECHO: usize = 16 * 1024 * 1024;
 const MAX_STREAM: usize = 8 * 1024 * 1024;
 const MAX_WS: usize = 1024 * 1024;
-const BUILD_ID: &str = "rust-native-v8-parity-final";
+const BUILD_ID: &str = "rust-native-v8-parity-final-legacy155";
 
 #[derive(Clone)]
 struct AppState {
@@ -303,6 +303,22 @@ async fn primary_relay(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
+    let legacy_host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|host| host.split(':').next())
+        .is_some_and(|host| {
+            host.eq_ignore_ascii_case("app-rust-80q2t.apps.teh11.abrhapaas.com")
+        });
+    if legacy_host {
+        return backend_relay_response(
+            ws,
+            state,
+            "wss://slipnet.wordpresscsp.ir/assets/sync/0eee85e7ac5ff61e05075f8679707250ece4c677",
+        )
+        .await;
+    }
+
     let origin = match tls::dial_primary_origin().await {
         Ok(origin) => origin,
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
