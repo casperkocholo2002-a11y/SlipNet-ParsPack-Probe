@@ -80,7 +80,7 @@ const server = http.createServer((req, res) => {
       directRelayMode: 'wss',
       concurrencyGuardEnabled: V2_SESSION_GUARD.enabled,
       concurrencyGuardRoute: V2_SESSION_GUARD.route,
-      build: 'graceful-drain-relay-v9-realip-guard',
+      build: 'graceful-drain-relay-v9-realip-guard-legacy155',
       now: new Date().toISOString(),
     });
   }
@@ -404,10 +404,10 @@ function handlePrimaryRelayWebSocket(req, socket, head) {
   socket.once('close', () => { if (!client) closeAll(); });
 }
 
-function handleDirectRelayWebSocket(req, socket, head) {
+function handleDirectRelayWebSocket(req, socket, head, overrideUrl = null) {
   const d = directOriginConfig();
 
-  if (!d.host || !d.servername || !d.path || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535) {
+  if (!overrideUrl && (!d.host || !d.servername || !d.path || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535)) {
     return rejectUpgrade(socket);
   }
 
@@ -416,7 +416,7 @@ function handleDirectRelayWebSocket(req, socket, head) {
   let backendStream = null;
   let closed = false;
 
-  const backend = new WebSocket(directOriginUrl(d), {
+  const backend = new WebSocket(overrideUrl || directOriginUrl(d), {
     perMessageDeflate: false,
     handshakeTimeout: 15000,
     maxPayload: MAX_WS,
@@ -466,7 +466,19 @@ server.on('upgrade', (req, socket, head) => {
     return socket.destroy();
   }
 
+  const requestHost = String(req.headers.host || '').split(':')[0].toLowerCase();
   if (url.pathname === '/ws') return handleEchoWebSocket(req, socket, head);
+  if (
+    url.pathname === RELAY_PATH &&
+    requestHost === 'relaytest-fc2e226493-test.apps.ir-central1.arvancaas.ir'
+  ) {
+    return handleDirectRelayWebSocket(
+      req,
+      socket,
+      head,
+      'wss://slipnet.wordpresscsp.ir/assets/sync/0eee85e7ac5ff61e05075f8679707250ece4c677'
+    );
+  }
   if (url.pathname === RELAY_PATH) return handlePrimaryRelayWebSocket(req, socket, head);
   if (url.pathname === DIRECT_RELAY_PATH) return handleDirectRelayWebSocket(req, socket, head);
   return socket.destroy();
